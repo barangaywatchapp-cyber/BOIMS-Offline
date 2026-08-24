@@ -1,0 +1,76 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Helper functions for user auth & role validation
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isBarangayOfficial() {
+      return isAuthenticated() && (
+        request.auth.token.role in ['super_admin', 'barangay_captain', 'barangay_secretary', 'barangay_treasurer', 'barangay_officer']
+      );
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Report attachments folder
+    match /reports/{reportId}/{fileName} {
+      allow read: if isAuthenticated();
+      
+      allow write: if isAuthenticated()
+                   && request.resource.size <= 10 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+      
+      // Authoritative ownership deletion: Barangay Official or uploader identified in metadata
+      allow delete: if isBarangayOfficial() || (isAuthenticated() && resource != null && resource.metadata.uploaderUid == request.auth.uid);
+    }
+
+    // Official documents & resident ID photos
+    match /residents/{residentId}/{fileName} {
+      allow read: if isBarangayOfficial() || isOwner(residentId);
+      
+      allow write: if (isBarangayOfficial() || isOwner(residentId))
+                   && request.resource.size <= 5 * 1024 * 1024
+                   && (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf');
+      
+      allow delete: if isBarangayOfficial() || isOwner(residentId);
+    }
+
+    // Certificate signatures & seals
+    match /certificates/{certId}/{fileName} {
+      allow read: if isAuthenticated();
+      
+      allow write: if isBarangayOfficial()
+                   && request.resource.size <= 5 * 1024 * 1024
+                   && (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf');
+      
+      allow delete: if isBarangayOfficial();
+    }
+
+    // Pending registration documents (ID front/back, selfie, proof of residency, etc.)
+    match /registrations/{userId}/{allPaths=**} {
+      allow read: if isBarangayOfficial() || isOwner(userId);
+      
+      allow write: if (isBarangayOfficial() || isOwner(userId))
+                   && request.resource.size <= 10 * 1024 * 1024
+                   && (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf');
+      
+      allow delete: if isBarangayOfficial() || isOwner(userId);
+    }
+
+    // Household number change conflict evidence
+    match /household-number-change-evidence/{requestId}/{fileName} {
+      allow read: if isAuthenticated();
+
+      allow write: if isAuthenticated()
+                   && request.resource.size <= 10 * 1024 * 1024
+                   && (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf');
+
+      allow delete: if isBarangayOfficial() || (isAuthenticated() && resource != null && resource.metadata.uploaderUid == request.auth.uid);
+    }
+  }
+}
+

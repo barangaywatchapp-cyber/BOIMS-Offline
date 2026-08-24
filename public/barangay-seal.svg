@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="500" height="500">
+  <defs>
+    <path id="outerTopPath" d="M 50,250 A 200,200 0 1,1 450,250" fill="none"/>
+    <path id="outerBottomPath" d="M 450,250 A 200,200 0 0,1 50,250" fill="none"/>
+    <path id="innerTopPath" d="M 115,250 A 135,135 0 1,1 385,250" fill="none"/>
+  </defs>
+
+  <!-- Outer White Circle & Black Border -->
+  <circle cx="250" cy="250" r="242" fill="#FFFFFF" stroke="#000000" stroke-width="4"/>
+  <circle cx="250" cy="250" r="202" fill="none" stroke="#000000" stroke-width="3"/>
+
+  <!-- Outer Ring Text -->
+  <text font-family="Arial, sans-serif" font-weight="900" font-size="20" fill="#000000" letter-spacing="1">
+    <textPath href="#outerTopPath" startOffset="50%" text-anchor="middle">
+      HOME OF SIKARAN • FIRST ORGANIC TOWN
+    </textPath>
+  </text>
+  <text font-family="Arial, sans-serif" font-weight="700" font-size="16" fill="#000000">
+    <textPath href="#outerBottomPath" startOffset="50%" text-anchor="middle">
+      <tspan fill="#DC2626">K</tspan>aunlaran ng <tspan fill="#DC2626">C</tspan>ommunidad ng <tspan fill="#DC2626">B</tspan>aras ang p<tspan fill="#DC2626">R</tspan>ayoridad
+    </textPath>
+  </text>
+
+  <!-- Yellow Gear Ring -->
+  <circle cx="250" cy="250" r="195" fill="#FACC15" stroke="#000000" stroke-width="3"/>
+  <!-- Gear Teeth (10 teeth) -->
+  <g stroke="#000000" stroke-width="3" fill="#FACC15">
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" />
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" transform="rotate(36 250 250)" />
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" transform="rotate(72 250 250)" />
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" transform="rotate(108 250 250)" />
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" transform="rotate(144 250 250)" />
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" transform="rotate(180 250 250)" />
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" transform="rotate(216 250 250)" />
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" transform="rotate(252 250 250)" />
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" transform="rotate(288 250 250)" />
+    <path d="M 235,52 L 265,52 L 260,70 L 240,70 Z" transform="rotate(324 250 250)" />
+  </g>
+
+  <!-- Inner White Ring -->
+  <circle cx="250" cy="250" r="162" fill="#FFFFFF" stroke="#000000" stroke-width="3"/>
+  <circle cx="250" cy="250" r="122" fill="#FFFFFF" stroke="#000000" stroke-width="3"/>
+
+  <!-- Inner Ring Text -->
+  <text font-family="Arial, sans-serif" font-weight="900" font-size="17" fill="#000000" letter-spacing="1">
+    <textPath href="#innerTopPath" startOffset="50%" text-anchor="middle">
+      PAMAHALAANG BAYAN NG BARAS, RIZAL
+    </textPath>
+  </text>
+  <text x="250" y="380" font-family="Arial, sans-serif" font-weight="900" font-size="20" fill="#000000" text-anchor="middle">
+    1595
+  </text>
+
+  <!-- Central Landscape Graphic Circle -->
+  <g clip-path="url(#centerClip)">
+    <clipPath id="centerClip">
+      <circle cx="250" cy="250" r="120"/>
+    </clipPath>
+
+    <!-- Sky Background -->
+    <rect x="130" y="130" width="240" height="120" fill="#E0F2FE"/>
+
+    <!-- Radio Tower Antennas -->
+    <path d="M 220,175 L 220,150 M 215,155 L 225,155 M 212,162 L 228,162" stroke="#000000" stroke-width="2"/>
+    <polygon points="218,150 222,150 224,175 216,175" fill="#000000"/>
+    <circle cx="210" cy="148" r="6" fill="none" stroke="#000000" stroke-width="2"/>
+    <circle cx="230" cy="148" r="6" fill="none" stroke="#000000" stroke-width="2"/>
+
+    <!-- Green Mountains -->
+    <path d="M 130,220 Q 180,140 230,200 Q 280,150 370,220 Z" fill="#15803D" stroke="#000000" stroke-width="2"/>
+
+    <!-- Rice Fields Grid (Golden Yellow/Green) -->
+    <rect x="130" y="215" width="240" height="70" fill="#EAB308"/>
+    <path d="M 130,230 L 370,230 M 130,245 L 370,245 M 130,260 L 370,260 M 180,215 L 180,285 M 230,215 L 230,285 M 280,215 L 280,285 M 330,215 L 330,285" stroke="#A16207" stroke-width="1.5"/>
+
+    <!-- Nipa Hut / Bahay Kubo -->
+    <polygon points="200,230 220,220 240,230" fill="#78350F" stroke="#000000" stroke-width="1.5"/>
+    <rect x="206" y="230" width="28" height="18" fill="#D97706" stroke="#000000" stroke-width="1.5"/>
+
+    <!-- Carabao & Farmer Silhouette -->
+    <ellipse cx="320" cy="250" rx="14" ry="9" fill="#000000"/>
+    <circle cx="332" cy="245" r="5" fill="#000000"/>
+    <circle cx="338" cy="238" r="4" fill="#000000"/>
+
+    <!-- Blue River Water -->
+    <path d="M 130,280 Q 210,270 240,290 Q 270,310 370,280 L 370,370 L 130,370 Z" fill="#0284C7" stroke="#000000" stroke-width="2"/>
+    <path d="M 235,270 Q 245,290 250,370" fill="none" stroke="#38BDF8" stroke-width="8"/>
+
+    <!-- Fishing Boat in Water -->
+    <path d="M 265,310 L 295,310 L 288,320 L 272,320 Z" fill="#DC2626" stroke="#000000" stroke-width="1.5"/>
+    <polygon points="280,295 280,310 292,310" fill="#FFFFFF" stroke="#000000" stroke-width="1"/>
+  </g>
+</svg>

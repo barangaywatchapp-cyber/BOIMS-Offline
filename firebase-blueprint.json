@@ -1,0 +1,95 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account profile for authentication and role-based access control",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "fullName": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "address": { "type": "string" },
+        "purok": { "type": "string" },
+        "barangay": { "type": "string" },
+        "municipality": { "type": "string" },
+        "province": { "type": "string" },
+        "role": { "type": "string" },
+        "status": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "email", "firstName", "lastName", "fullName", "role", "status"]
+    },
+    "RegistrationApplication": {
+      "title": "RegistrationApplication",
+      "description": "Self-registration request for resident or official account verification",
+      "type": "object",
+      "properties": {
+        "registrationId": { "type": "string" },
+        "uid": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "purok": { "type": "string" },
+        "requestedRole": { "type": "string" },
+        "idType": { "type": "string" },
+        "idNumber": { "type": "string" },
+        "idFrontUrl": { "type": "string" },
+        "status": { "type": "string" },
+        "submittedAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["registrationId", "uid", "fullName", "email", "status", "submittedAt"]
+    },
+    "Resident": {
+      "title": "Resident",
+      "description": "Official resident profile in barangay directory",
+      "type": "object",
+      "properties": {
+        "residentId": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "fullName": { "type": "string" },
+        "purok": { "type": "string" },
+        "verificationStatus": { "type": "string" }
+      },
+      "required": ["residentId", "fullName", "purok", "verificationStatus"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "System event audit trail",
+      "type": "object",
+      "properties": {
+        "auditId": { "type": "string" },
+        "action": { "type": "string" },
+        "performedBy": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["auditId", "action", "performedBy", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User account document"
+    },
+    "/registrations/{registrationId}": {
+      "schema": { "$ref": "#/entities/RegistrationApplication" },
+      "description": "Registration application documents for verification"
+    },
+    "/residents/{residentId}": {
+      "schema": { "$ref": "#/entities/Resident" },
+      "description": "Barangay resident directory profile"
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable security and action audit logs"
+    }
+  }
+}

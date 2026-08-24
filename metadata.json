@@ -1,0 +1,6 @@
+{
+  "name": "Barangay Operations & Information Management System",
+  "description": "A digital governance platform for barangays, streamlining incident reporting, resident services, certificates, inventory, blotter management, announcements, and administrative coordination.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

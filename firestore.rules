@@ -1,0 +1,732 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- HELPER FUNCTIONS ---
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function getUserRole() {
+      return isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        ? userDoc().data.role
+        : null;
+    }
+
+    function isStaffOrAdmin() {
+      return isAuthenticated() && getUserRole() in [
+        'purokOfficial',
+        'verifier',
+        'secretary',
+        'admin',
+        'chairman',
+        'superAdmin',
+        'developer'
+      ];
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() in [
+        'admin',
+        'superAdmin',
+        'developer'
+      ];
+    }
+
+    function isSecretaryOrChairman() {
+      return isAuthenticated() && getUserRole() in [
+        'secretary',
+        'chairman'
+      ];
+    }
+
+    function isTreasurer() {
+      return isAuthenticated() && getUserRole() == 'treasurer';
+    }
+
+    function isFinancialOfficer() {
+      return isAuthenticated() && getUserRole() in [
+        'treasurer',
+        'secretary',
+        'chairman',
+        'admin',
+        'superAdmin',
+        'developer'
+      ];
+    }
+
+    function isExecutiveOrAdmin() {
+      return isAuthenticated() && getUserRole() in [
+        'secretary',
+        'chairman',
+        'admin',
+        'superAdmin',
+        'developer'
+      ];
+    }
+
+    function isDispatcher() {
+      return isAuthenticated() &&
+        getUserRole() in ['purokOfficial', 'purokLeader'] &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        'dutyMode' in userDoc().data && userDoc().data.dutyMode == 'dispatcher' &&
+        'dutyStatus' in userDoc().data && userDoc().data.dutyStatus == 'onDuty';
+    }
+
+    function isAssignedResponder(reportData) {
+      return isAuthenticated() &&
+        getUserRole() in ['purokOfficial', 'purokLeader'] &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        'dutyMode' in userDoc().data && userDoc().data.dutyMode == 'responder' &&
+        'dutyStatus' in userDoc().data && userDoc().data.dutyStatus == 'onDuty' &&
+        reportData != null &&
+        (
+          ('assignedTo' in reportData && reportData.assignedTo == request.auth.uid) ||
+          ('assignedResponders' in reportData && request.auth.uid in reportData.assignedResponders)
+        );
+    }
+
+    function isOperationalReportCreator() {
+      return isAuthenticated() && (
+        isExecutiveOrAdmin() ||
+        (
+          getUserRole() in ['purokOfficial', 'purokLeader'] &&
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          'dutyStatus' in userDoc().data && userDoc().data.dutyStatus == 'onDuty'
+        )
+      );
+    }
+
+    function isReportStaff() {
+      return isAuthenticated() && getUserRole() in [
+        'purokOfficial',
+        'purokLeader',
+        'secretary',
+        'chairman',
+        'admin',
+        'superAdmin',
+        'developer'
+      ];
+    }
+
+    // --- PUBLIC & SYSTEM ---
+
+    // Public QR Verification Token Projections
+    match /publicVerifications/{token} {
+      allow get: if true;
+      allow list: if isStaffOrAdmin() || isTreasurer();
+      allow create, update: if isStaffOrAdmin() || isTreasurer();
+      allow delete: if isAdmin();
+    }
+
+    // Connection health check for client initialization
+    match /system/connection_health {
+      allow get: if true;
+      allow write: if isAdmin();
+    }
+
+    // Barangay profile and app configuration settings (Secretary + Chairman ONLY)
+    match /settings/{settingId} {
+      allow read, write: if isSecretaryOrChairman();
+    }
+
+    // --- USER MANAGEMENT & REGISTRATIONS ---
+
+    // BOIMS ID & Registration Validation Helpers
+    function isValidBoimsId(id) {
+      return id is string && id.matches('^BOIMS-[A-Z0-9]{4}-[A-Z0-9]{4}$');
+    }
+
+    function hasClaimableRegistration(targetUid) {
+      let regPath = /databases/$(database)/documents/registrations/$(targetUid);
+      return exists(regPath) &&
+        get(regPath).data.uid == targetUid &&
+        get(regPath).data.emailVerified == true &&
+        get(regPath).data.status in ['pending', 'under_review'];
+    }
+
+    function hasValidRegistration(targetUid) {
+      let regPath = /databases/$(database)/documents/registrations/$(targetUid);
+      return exists(regPath) &&
+        get(regPath).data.uid == targetUid &&
+        get(regPath).data.emailVerified == true &&
+        get(regPath).data.status in ['pending', 'under_review', 'approved'];
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isStaffOrAdmin() || isTreasurer());
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          isStaffOrAdmin() &&
+          hasValidRegistration(userId) &&
+          request.resource.data.uid == userId &&
+          request.resource.data.status == 'active' &&
+          request.resource.data.emailVerified == true &&
+          request.resource.data.role in ['resident', 'purokOfficial'] &&
+          isValidBoimsId(request.resource.data.boimsId) &&
+          getAfter(/databases/$(database)/documents/userBoimsIndexes/$(userId)).data.boimsId == request.resource.data.boimsId
+        ) ||
+        (
+          request.auth.uid == userId &&
+          (!('role' in request.resource.data) || request.resource.data.role == 'resident') &&
+          (!('status' in request.resource.data) || request.resource.data.status == 'pending') &&
+          !('permissions' in request.resource.data) &&
+          !('isVerified' in request.resource.data) &&
+          !('approvedAt' in request.resource.data) &&
+          !('verifiedBy' in request.resource.data) &&
+          !('boimsId' in request.resource.data)
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          isStaffOrAdmin() &&
+          hasValidRegistration(userId) &&
+          request.resource.data.role in ['resident', 'purokOfficial'] &&
+          request.resource.data.status == 'active' &&
+          isValidBoimsId(request.resource.data.boimsId) &&
+          getAfter(/databases/$(database)/documents/userBoimsIndexes/$(userId)).data.boimsId == request.resource.data.boimsId &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['password', 'authProvider', 'securityStamp'])
+        ) ||
+        (
+          request.auth.uid == userId &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'role', 'status', 'permissions', 'isVerified', 'approvedAt', 'verifiedBy', 'boimsId'
+          ])
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Server-Authoritative Collections for Pending Registrations & Verification Tokens
+    match /pendingRegistrations/{pendingId} {
+      allow read, write: if false; // Accessible only via Firebase Admin SDK
+    }
+
+    match /emailVerificationTokens/{tokenHash} {
+      allow read, write: if false; // Accessible only via Firebase Admin SDK
+    }
+
+    match /registrations/{registrationId} {
+      allow read: if isAuthenticated() && (
+        request.auth.uid == registrationId ||
+        (resource != null && resource.data.uid == request.auth.uid) ||
+        isStaffOrAdmin()
+      );
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.auth.uid == registrationId &&
+          request.resource.data.uid == request.auth.uid &&
+          request.resource.data.status == 'pending' &&
+          request.resource.data.emailVerified == false &&
+          !('approvedAt' in request.resource.data) &&
+          !('approvedBy' in request.resource.data) &&
+          !('verifiedAt' in request.resource.data) &&
+          !('verifiedBy' in request.resource.data)
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (
+          (request.auth.uid == registrationId || (resource != null && resource.data.uid == request.auth.uid)) &&
+          resource.data.status in ['pending', 'draft', 'needs_revision', 'returned'] &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'status', 'approvedAt', 'approvedBy', 'rejectionReason', 'verifiedAt', 'verifiedBy'
+          ])
+        )
+      );
+      allow delete: if isAdmin();
+
+      match /documents/{documentId} {
+        allow read: if isAuthenticated() && (
+          request.auth.uid == registrationId ||
+          isStaffOrAdmin()
+        );
+        allow write: if isAuthenticated() && (
+          isStaffOrAdmin() ||
+          (
+            request.auth.uid == registrationId &&
+            get(/databases/$(database)/documents/registrations/$(registrationId)).data.status in ['pending', 'draft', 'needs_revision', 'returned']
+          )
+        );
+      }
+    }
+
+    match /userBoimsIndexes/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isStaffOrAdmin());
+      allow create: if isStaffOrAdmin() &&
+        hasClaimableRegistration(userId) &&
+        isValidBoimsId(request.resource.data.boimsId) &&
+        request.resource.data.keys().hasOnly(['boimsId', 'createdAt', 'updatedAt']) &&
+        getAfter(/databases/$(database)/documents/boimsIds/$(request.resource.data.boimsId)).data.uid == userId;
+      allow update: if isStaffOrAdmin() &&
+        hasValidRegistration(userId) &&
+        request.resource.data.boimsId == resource.data.boimsId &&
+        request.resource.data.keys().hasOnly(['boimsId', 'createdAt', 'updatedAt']) &&
+        getAfter(/databases/$(database)/documents/boimsIds/$(resource.data.boimsId)).data.uid == userId;
+      allow delete: if isAdmin();
+    }
+
+    match /boimsIds/{boimsId} {
+      allow get: if isAuthenticated();
+      allow list: if isStaffOrAdmin();
+      allow create: if isStaffOrAdmin() &&
+        isValidBoimsId(boimsId) &&
+        request.resource.data.keys().hasOnly(['uid', 'createdAt']) &&
+        request.resource.data.uid is string &&
+        hasClaimableRegistration(request.resource.data.uid) &&
+        getAfter(/databases/$(database)/documents/userBoimsIndexes/$(request.resource.data.uid)).data.boimsId == boimsId;
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
+    // --- RESIDENTS & HOUSEHOLDS ---
+
+    match /residents/{residentId} {
+      allow read: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        isTreasurer() ||
+        (resource != null && resource.data.linkedUserId == request.auth.uid)
+      );
+      allow create, update: if isStaffOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /households/{householdId} {
+      allow get: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        isTreasurer() ||
+        (resource != null && (
+          resource.data.createdBy == request.auth.uid ||
+          resource.data.headUserUid == request.auth.uid ||
+          resource.data.headUserId == request.auth.uid ||
+          resource.data.householdHeadId == request.auth.uid ||
+          (resource.data.memberResidentIds != null && request.auth.uid in resource.data.memberResidentIds) ||
+          (resource.data.memberUids != null && request.auth.uid in resource.data.memberUids)
+        ))
+      );
+      allow list: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        isTreasurer() ||
+        (resource != null && (
+          (resource.data.memberResidentIds != null && request.auth.uid in resource.data.memberResidentIds) ||
+          (resource.data.memberUids != null && request.auth.uid in resource.data.memberUids)
+        ))
+      );
+      allow create: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (request.resource.data.createdBy == request.auth.uid || request.resource.data.householdHeadId == request.auth.uid)
+      );
+      allow update: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (resource != null && (
+          resource.data.createdBy == request.auth.uid ||
+          resource.data.headUserUid == request.auth.uid ||
+          resource.data.headUserId == request.auth.uid ||
+          resource.data.householdHeadId == request.auth.uid ||
+          (resource.data.memberResidentIds != null && request.auth.uid in resource.data.memberResidentIds) ||
+          (resource.data.memberUids != null && request.auth.uid in resource.data.memberUids)
+        ))
+      );
+      allow delete: if isAdmin();
+    }
+
+    function isHouseholdMemberOrOwner(hhId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/households/$(hhId)) &&
+        (
+          get(/databases/$(database)/documents/households/$(hhId)).data.createdBy == request.auth.uid ||
+          get(/databases/$(database)/documents/households/$(hhId)).data.headUserUid == request.auth.uid ||
+          get(/databases/$(database)/documents/households/$(hhId)).data.headUserId == request.auth.uid ||
+          get(/databases/$(database)/documents/households/$(hhId)).data.householdHeadId == request.auth.uid ||
+          (
+            'memberResidentIds' in get(/databases/$(database)/documents/households/$(hhId)).data &&
+            request.auth.uid in get(/databases/$(database)/documents/households/$(hhId)).data.memberResidentIds
+          ) ||
+          (
+            'memberUids' in get(/databases/$(database)/documents/households/$(hhId)).data &&
+            request.auth.uid in get(/databases/$(database)/documents/households/$(hhId)).data.memberUids
+          )
+        );
+    }
+
+    match /householdNumbers/{numberId} {
+      allow get: if isAuthenticated();
+      allow list: if isStaffOrAdmin();
+      allow create: if isStaffOrAdmin() || (
+        isAuthenticated() &&
+        request.resource.data.householdId != null &&
+        isHouseholdMemberOrOwner(request.resource.data.householdId)
+      );
+      allow update: if isStaffOrAdmin() || (
+        isAuthenticated() &&
+        resource != null &&
+        request.resource.data.householdId != null &&
+        resource.data.householdId == request.resource.data.householdId &&
+        isHouseholdMemberOrOwner(request.resource.data.householdId)
+      );
+      allow delete: if isAdmin();
+    }
+
+    // --- HOUSEHOLD INVITATIONS ---
+
+    match /householdInvites/{inviteId} {
+      allow get: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (resource != null && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid))
+      );
+      allow list: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (resource != null && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid))
+      );
+      allow create: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (
+          request.resource.data.fromUid == request.auth.uid &&
+          request.resource.data.toUid != request.auth.uid &&
+          request.resource.data.status == 'pending'
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (
+          resource != null &&
+          resource.data.status == 'pending' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'respondedAt', 'updatedAt']) &&
+          (
+            // Recipient can accept or reject
+            (
+              resource.data.toUid == request.auth.uid &&
+              request.resource.data.status in ['accepted', 'rejected']
+            ) ||
+            // Sender can cancel
+            (
+              resource.data.fromUid == request.auth.uid &&
+              request.resource.data.status == 'cancelled'
+            )
+          )
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // --- SYSTEM COUNTERS ---
+
+    match /systemCounters/{counterId} {
+      allow read: if isStaffOrAdmin() || isTreasurer();
+      allow create, update: if isSecretaryOrChairman() || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // --- HOUSEHOLD NUMBER CHANGE REQUESTS ---
+
+    match /householdNumberChangeRequests/{requestId} {
+      allow get, list: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (resource != null && resource.data.requesterUid == request.auth.uid)
+      );
+      allow create: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (
+          request.resource.data.requesterUid == request.auth.uid &&
+          request.resource.data.status == 'pending_review'
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (
+          resource != null &&
+          resource.data.requesterUid == request.auth.uid &&
+          resource.data.status == 'pending_review' &&
+          request.resource.data.status == 'cancelled'
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // --- CERTIFICATE REQUESTS ---
+
+    match /certificateRequests/{requestId} {
+      allow read: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        isTreasurer() ||
+        (resource != null && resource.data.userId == request.auth.uid)
+      );
+      allow create: if isAuthenticated() && (
+        isFinancialOfficer() ||
+        isStaffOrAdmin() ||
+        (
+          request.resource.data.userId == request.auth.uid &&
+          (!('status' in request.resource.data) || request.resource.data.status in ['submitted', 'pending', 'draft']) &&
+          !('issuedAt' in request.resource.data) &&
+          !('issuedBy' in request.resource.data) &&
+          !('rejectionReason' in request.resource.data) &&
+          !('orNumber' in request.resource.data) &&
+          (!('paymentStatus' in request.resource.data) || request.resource.data.paymentStatus in ['unpaid', 'waived'])
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isFinancialOfficer() ||
+        (
+          isStaffOrAdmin() &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'paymentStatus', 'orNumber', 'amount', 'issuedAt', 'issuedBy', 'issuedByName', 'releasedBy', 'releasedAt', 'claimedAt', 'controlNumber'
+          ])
+        ) ||
+        (
+          resource != null && resource.data.userId == request.auth.uid &&
+          resource.data.status == 'draft' &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'status', 'issuedAt', 'issuedBy', 'rejectionReason', 'controlNumber', 'paymentStatus', 'orNumber', 'amount'
+          ])
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // --- COMMUNITY REPORTS (Hardened Phase 15) ---
+
+    match /reports/{reportId} {
+      // READ:
+      // - Operational Staff & Admins can read (supports onSnapshot list queries)
+      // - Residents can read only their own filed reports
+      allow read: if isAuthenticated() && (
+        isReportStaff() ||
+        (resource != null && (resource.data.reporterId == request.auth.uid || resource.data.userId == request.auth.uid))
+      );
+
+      // CREATE:
+      // - Operational Staff (Executive/Admin or On-Duty Purok Officials/Leaders) can create reports
+      // - Residents can create only reports owned by themselves with pending/draft/submitted status & no staff/resolution/escalation fields
+      allow create: if isAuthenticated() && (
+        isOperationalReportCreator() ||
+        (
+          request.resource.data.userId == request.auth.uid &&
+          (!('reporterId' in request.resource.data) || request.resource.data.reporterId == request.auth.uid) &&
+          (!('createdBy' in request.resource.data) || request.resource.data.createdBy == request.auth.uid) &&
+          (!('reportedBy' in request.resource.data) || request.resource.data.reportedBy == request.auth.uid) &&
+          (!('status' in request.resource.data) || request.resource.data.status in ['pending', 'draft', 'submitted']) &&
+          !('assignedTo' in request.resource.data) &&
+          !('assignedToName' in request.resource.data) &&
+          !('assignedBy' in request.resource.data) &&
+          !('assignedAt' in request.resource.data) &&
+          !('resolvedBy' in request.resource.data) &&
+          !('resolvedAt' in request.resource.data) &&
+          !('resolutionRemarks' in request.resource.data) &&
+          !('resolutionNotes' in request.resource.data) &&
+          !('officialRemarks' in request.resource.data) &&
+          !('escalatedBy' in request.resource.data) &&
+          !('escalatedByName' in request.resource.data) &&
+          !('escalatedAt' in request.resource.data) &&
+          !('escalationRemarks' in request.resource.data) &&
+          !('blotterCaseId' in request.resource.data)
+        )
+      );
+
+      // UPDATE:
+      // 1. Resolved reports are IMMUTABLE (cannot be modified by anyone except soft-delete by admin)
+      // 2. Escalated reports can ONLY be modified by Secretary or Chairman
+      // 3. Operational report staff mutations partitioned by authorized operational role:
+      //    a. Executive / Admin (Secretary, Chairman, Admin, SuperAdmin, Developer)
+      //    b. On-Duty Dispatcher (Purok Official with dispatcher mode; strict allowlist, legal status transitions, actor integrity)
+      //    c. On-Duty Field Responder (Purok Official assigned to this report; strict allowlist, cannot reassign or escalate)
+      // 4. Residents can only edit non-restricted details of their own 'pending' reports
+      allow update: if isAuthenticated() && (
+        // 1. Executive / Admin operations
+        (
+          isExecutiveOrAdmin() &&
+          // Resolved reports are strictly immutable (unless admin performs soft delete)
+          (resource == null || resource.data.status != 'resolved' || (isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isDeleted', 'deletedAt', 'deletedBy']))) &&
+          // Escalated reports strictly require Secretary or Chairman
+          (resource == null || resource.data.status != 'escalated' || isSecretaryOrChairman()) &&
+          // Immutable baseline creation and ownership fields cannot be modified on existing reports
+          (resource == null || !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'userId', 'reporterId', 'createdBy', 'reportedBy', 'createdAt', 'reportNumber', 'reportId'
+          ]))
+        ) ||
+        // 2. On-Duty Dispatcher operations (Active, non-escalated, non-resolved reports; strict allowlist, legal status transitions, actor integrity, history preservation)
+        (
+          isDispatcher() &&
+          (resource == null || resource.data.status != 'resolved') &&
+          (resource == null || resource.data.status != 'escalated') &&
+          request.resource.data.status in ['pending', 'assigned', 'inProgress', 'resolved', 'escalated', 'rejected'] &&
+          (!('assignedBy' in request.resource.data) || request.resource.data.assignedBy == request.auth.uid) &&
+          (!('resolvedBy' in request.resource.data) || request.resource.data.resolvedBy == request.auth.uid) &&
+          (!('escalatedBy' in request.resource.data) || request.resource.data.escalatedBy == request.auth.uid) &&
+          (request.resource.data.status != 'escalated' || ('escalatedBy' in request.resource.data && request.resource.data.escalatedBy == request.auth.uid)) &&
+          (request.resource.data.status == 'resolved' || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['resolvedBy', 'resolvedAt', 'resolutionRemarks', 'resolutionNotes'])) &&
+          (resource == null || !('timeline' in resource.data) || !('timeline' in request.resource.data) || request.resource.data.timeline.hasAll(resource.data.timeline)) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status', 'timeline', 'updatedAt', 'priority', 'category', 'description', 'title',
+            'assignedTo', 'assignedToName', 'assignedBy', 'assignedAt', 'assignedResponders',
+            'resolvedBy', 'resolvedAt', 'resolutionRemarks', 'resolutionNotes',
+            'escalatedBy', 'escalatedByName', 'escalatedAt', 'escalationRemarks',
+            'officialRemarks', 'statusLogs', 'imageUrls', 'location'
+          ])
+        ) ||
+        // 3. On-Duty Field Responder operations (Assigned reports only; strict allowlist, cannot reassign or escalate, history preservation)
+        (
+          resource != null &&
+          isAssignedResponder(resource.data) &&
+          resource.data.status != 'resolved' &&
+          resource.data.status != 'escalated' &&
+          request.resource.data.status != 'escalated' &&
+          request.resource.data.status in ['assigned', 'inProgress', 'resolved'] &&
+          (!('resolvedBy' in request.resource.data) || request.resource.data.resolvedBy == request.auth.uid) &&
+          (request.resource.data.status == 'resolved' || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['resolvedBy', 'resolvedAt', 'resolutionRemarks', 'resolutionNotes'])) &&
+          (!('timeline' in resource.data) || !('timeline' in request.resource.data) || request.resource.data.timeline.hasAll(resource.data.timeline)) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status', 'timeline', 'updatedAt',
+            'resolvedBy', 'resolvedAt', 'resolutionRemarks', 'resolutionNotes',
+            'officialRemarks', 'statusLogs'
+          ])
+        ) ||
+        // 4. Resident update rules (Own pending report only, non-restricted fields)
+        (
+          resource != null &&
+          (resource.data.reporterId == request.auth.uid || resource.data.userId == request.auth.uid) &&
+          resource.data.status == 'pending' &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'status', 'assignedTo', 'assignedToName', 'assignedBy', 'assignedAt',
+            'resolvedBy', 'resolvedAt', 'resolutionRemarks', 'resolutionNotes',
+            'escalatedBy', 'escalatedByName', 'escalatedAt', 'escalationRemarks', 'blotterCaseId',
+            'officialRemarks', 'statusLogs',
+            'userId', 'createdBy', 'reportedBy', 'reporterId', 'purok', 'jurisdiction'
+          ])
+        )
+      );
+
+      // DELETE:
+      // - Reports are strictly immutable to hard-deletion; Admin may only soft-delete via update
+      allow delete: if false;
+    }
+
+    // --- BLOTTER & COMPLAINTS ---
+
+    match /blotterCases/{caseId} {
+      allow read, create, update, delete: if isSecretaryOrChairman();
+    }
+
+    // --- INVENTORY MANAGEMENT ---
+
+    match /inventory/{assetId} {
+      allow read, create, update, delete: if isSecretaryOrChairman();
+    }
+
+    // --- ANNOUNCEMENTS ---
+
+    match /announcements/{announcementId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isStaffOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // --- NOTIFICATIONS ---
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        isTreasurer() ||
+        (
+          resource != null && (
+            resource.data.userId == request.auth.uid ||
+            resource.data.userId in ['all_residents', 'all', 'all_staff', 'staff_secretary']
+          )
+        )
+      );
+      allow create: if isAuthenticated() && (
+        // System-wide broadcast notifications (Secretary, Chairman, Admin only)
+        (
+          request.resource.data.userId in ['all', 'all_residents', 'all_staff', 'staff_secretary'] &&
+          (isSecretaryOrChairman() || isAdmin())
+        ) ||
+        // User-targeted operational notifications by staff
+        (
+          isStaffOrAdmin() &&
+          !(request.resource.data.userId in ['all', 'all_residents', 'all_staff', 'staff_secretary'])
+        ) ||
+        // Self notifications
+        (
+          request.resource.data.userId == request.auth.uid &&
+          (!('createdBy' in request.resource.data) || request.resource.data.createdBy == request.auth.uid)
+        ) ||
+        // Family request notifications
+        (
+          request.resource.data.createdBy == request.auth.uid &&
+          request.resource.data.type == 'family_request' &&
+          'metadata' in request.resource.data &&
+          'inviteId' in request.resource.data.metadata &&
+          exists(/databases/$(database)/documents/householdInvites/$(request.resource.data.metadata.inviteId)) &&
+          get(/databases/$(database)/documents/householdInvites/$(request.resource.data.metadata.inviteId)).data.fromUid == request.auth.uid &&
+          get(/databases/$(database)/documents/householdInvites/$(request.resource.data.metadata.inviteId)).data.toUid == request.resource.data.userId
+        ) ||
+        // Household number conflict alerts
+        (
+          request.resource.data.createdBy == request.auth.uid &&
+          request.resource.data.type == 'household_number_conflict' &&
+          request.resource.data.userId in ['all_staff', 'staff_secretary'] &&
+          'metadata' in request.resource.data &&
+          'requestId' in request.resource.data.metadata &&
+          'householdId' in request.resource.data.metadata &&
+          exists(/databases/$(database)/documents/householdNumberChangeRequests/$(request.resource.data.metadata.requestId)) &&
+          get(/databases/$(database)/documents/householdNumberChangeRequests/$(request.resource.data.metadata.requestId)).data.requesterUid == request.auth.uid &&
+          get(/databases/$(database)/documents/householdNumberChangeRequests/$(request.resource.data.metadata.requestId)).data.status == 'pending_review'
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isStaffOrAdmin() ||
+        (
+          resource != null &&
+          (
+            resource.data.userId == request.auth.uid ||
+            resource.data.userId in ['all_residents', 'all', 'all_staff', 'staff_secretary']
+          ) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt', 'isDeleted', 'deletedAt'])
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // --- DEVICE TOKENS (FCM Push Registrations) ---
+    // Enforces strict user isolation: authenticated user may only read/write/delete their own device token records.
+    match /deviceTokens/{tokenId} {
+      allow read: if isAuthenticated() && (
+        resource != null && resource.data.userId == request.auth.uid
+      );
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.token is string &&
+        request.resource.data.token.size() > 10;
+      allow update: if isAuthenticated() &&
+        resource != null &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() &&
+        resource != null &&
+        (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // --- AUDIT LOGS ---
+
+    match /auditLogs/{auditId} {
+      allow create: if isAuthenticated() && (
+        'performedBy' in request.resource.data &&
+        request.resource.data.performedBy == request.auth.uid
+      );
+      allow read: if isStaffOrAdmin() || isTreasurer();
+      allow update, delete: if false;
+    }
+
+  }
+}
