@@ -53,6 +53,23 @@ export class OfflineMutationQueue {
       );
     }
 
+    // 3. Resolve baseline updatedAt from cached entity if not explicitly provided
+    let baseUpdatedAt: string | undefined = params.baseUpdatedAt;
+    if (!baseUpdatedAt && (params.operation === 'update' || params.operation === 'delete')) {
+      try {
+        const cached = await offlineStorage.getCachedEntity<any>(params.collectionName, params.recordId);
+        if (cached) {
+          if (cached.data && typeof cached.data === 'object' && typeof cached.data.updatedAt === 'string') {
+            baseUpdatedAt = cached.data.updatedAt;
+          } else if (typeof cached.updatedAt === 'string') {
+            baseUpdatedAt = cached.updatedAt;
+          }
+        }
+      } catch {
+        // Safe fallback if reading cache fails
+      }
+    }
+
     const now = new Date().toISOString();
     const queueId = `MUT-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
@@ -71,15 +88,16 @@ export class OfflineMutationQueue {
       clientGeneratedId: params.clientGeneratedId ?? true,
       idempotencyKey: params.idempotencyKey || `${params.collectionName}:${params.recordId}:${params.operation}`,
       optimistic: params.applyOptimistic !== false,
+      baseUpdatedAt,
     };
 
-    // 3. Validate mutation structural integrity
+    // 4. Validate mutation structural integrity
     const validation = validateOfflineMutation(mutation);
     if (!validation.valid) {
       throw new Error(`Invalid offline mutation: ${validation.error}`);
     }
 
-    // 4. Persist mutation to IndexedDB offlineQueue store
+    // 5. Persist mutation to IndexedDB offlineQueue store
     await offlineStorage.putQueueItem({
       queueId: mutation.queueId,
       operation: mutation.operation,
@@ -90,6 +108,7 @@ export class OfflineMutationQueue {
       updatedAt: mutation.updatedAt,
       retryCount: mutation.retryCount,
       status: mutation.status,
+      baseUpdatedAt: mutation.baseUpdatedAt,
     });
 
     // 5. Apply local optimistic state to offlineEntities cache if requested

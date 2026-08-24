@@ -15,7 +15,7 @@
 
 import { SyncQueueItem, User } from '../types';
 import { db } from '../firebase/config';
-import { doc, setDoc, deleteDoc, arrayUnion } from 'firebase/firestore';
+import { doc, getDoc, setDoc, deleteDoc, arrayUnion } from 'firebase/firestore';
 import { storageService } from './storageService';
 import { offlineStorage } from '../offline/storage';
 import { offlineMutationQueue } from '../offline/mutationQueue';
@@ -30,6 +30,7 @@ import {
   DLQFailureReason,
   calculateBackoffDelay,
   isPermanentError,
+  detectMutationConflict,
 } from '../offline/types';
 import { syncQueueMigration, normalizeCollectionName } from '../offline/syncMigration';
 
@@ -302,6 +303,43 @@ class SyncService {
           const normalizedCollection = normalizeCollectionName(item.collectionName);
           const docRef = doc(db, normalizedCollection, item.recordId);
 
+          // Phase 7: Safe Pre-Replay Remote Inspection & Conflict Detection
+          let remoteExists = false;
+          let remoteData: any = null;
+          try {
+            const remoteSnap = await getDoc(docRef);
+            remoteExists = remoteSnap && typeof remoteSnap.exists === 'function' ? remoteSnap.exists() : false;
+            remoteData = remoteExists && typeof remoteSnap.data === 'function' ? remoteSnap.data() : null;
+          } catch (inspectErr: any) {
+            // Re-throw inspection errors to let permanent/transient error handling decide
+            throw inspectErr;
+          }
+
+          const conflictResult = detectMutationConflict(item, remoteData, remoteExists);
+          if (conflictResult.hasConflict) {
+            console.warn(
+              `[SyncService] Conflict detected (${conflictResult.reason}) for item ${item.queueId} on ${normalizedCollection}/${item.recordId}. Moving to DLQ:`,
+              conflictResult.errorMessage
+            );
+            await offlineStorage.moveToDLQ(
+              item,
+              conflictResult.reason || 'permanent_error',
+              {
+                code: conflictResult.reason,
+                message: conflictResult.errorMessage,
+                conflictDetails: {
+                  remoteExists: conflictResult.remoteExists,
+                  remoteUpdatedAt: conflictResult.remoteUpdatedAt,
+                  remoteIsDeleted: conflictResult.remoteIsDeleted,
+                  detectedAt: new Date().toISOString(),
+                  reason: conflictResult.reason || 'conflict',
+                },
+              }
+            );
+            failed++;
+            continue;
+          }
+
           if (item.operation === 'create') {
             await setDoc(
               docRef,
@@ -316,7 +354,9 @@ class SyncService {
             }
             await setDoc(docRef, updatePayload, { merge: true });
           } else if (item.operation === 'delete') {
-            await deleteDoc(docRef);
+            if (remoteExists && !remoteData?.isDeleted) {
+              await deleteDoc(docRef);
+            }
           }
 
           // Remote execution succeeded — reconcile local IndexedDB cache
@@ -410,6 +450,42 @@ class SyncService {
       const normalizedCollection = normalizeCollectionName(item.collectionName);
       const docRef = doc(db, normalizedCollection, item.recordId);
 
+      // Phase 7: Safe Pre-Replay Remote Inspection & Conflict Detection
+      let remoteExists = false;
+      let remoteData: any = null;
+      try {
+        const remoteSnap = await getDoc(docRef);
+        remoteExists = remoteSnap && typeof remoteSnap.exists === 'function' ? remoteSnap.exists() : false;
+        remoteData = remoteExists && typeof remoteSnap.data === 'function' ? remoteSnap.data() : null;
+      } catch (inspectErr: any) {
+        throw inspectErr;
+      }
+
+      const conflictResult = detectMutationConflict(item, remoteData, remoteExists);
+      if (conflictResult.hasConflict) {
+        console.warn(
+          `[SyncService] Conflict detected during retry (${conflictResult.reason}) for item ${item.queueId}. Quarantining to DLQ:`,
+          conflictResult.errorMessage
+        );
+        await offlineStorage.moveToDLQ(
+          item,
+          conflictResult.reason || 'permanent_error',
+          {
+            code: conflictResult.reason,
+            message: conflictResult.errorMessage,
+            conflictDetails: {
+              remoteExists: conflictResult.remoteExists,
+              remoteUpdatedAt: conflictResult.remoteUpdatedAt,
+              remoteIsDeleted: conflictResult.remoteIsDeleted,
+              detectedAt: new Date().toISOString(),
+              reason: conflictResult.reason || 'conflict',
+            },
+          }
+        );
+        await this.refreshMemoryQueue();
+        return false;
+      }
+
       if (item.operation === 'create') {
         await setDoc(
           docRef,
@@ -424,7 +500,9 @@ class SyncService {
         }
         await setDoc(docRef, updatePayload, { merge: true });
       } else if (item.operation === 'delete') {
-        await deleteDoc(docRef);
+        if (remoteExists && !remoteData?.isDeleted) {
+          await deleteDoc(docRef);
+        }
       }
 
       // Update local cache

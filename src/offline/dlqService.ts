@@ -59,6 +59,10 @@ export class DeadLetterQueueService {
       structural_validation_failed: 0,
       authentication_required: 0,
       manual_quarantine: 0,
+      conflict_remote_newer: 0,
+      conflict_remote_deleted: 0,
+      conflict_create_collision: 0,
+      conflict_stale_delete: 0,
     };
 
     let lastFailedAt: string | null = null;
@@ -163,6 +167,7 @@ export class DeadLetterQueueService {
       userRole: contextUser?.role || item.originatingUserRole,
       clientGeneratedId: true,
       optimistic: true,
+      baseUpdatedAt: item.baseUpdatedAt,
     };
 
     // Validate structural integrity
@@ -182,6 +187,7 @@ export class DeadLetterQueueService {
       updatedAt: restoredMutation.updatedAt,
       retryCount: 0,
       status: 'pending',
+      baseUpdatedAt: restoredMutation.baseUpdatedAt,
     });
 
     // Step 2: Delete from DLQ store

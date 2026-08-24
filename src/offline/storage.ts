@@ -1083,6 +1083,18 @@ class OfflineStorage {
     const errCode = error?.code || queueItem.lastErrorCode || '';
     const errMsg = error?.message || queueItem.lastError || String(error || '');
 
+    const conflictDetails =
+      error?.conflictDetails ||
+      (error?.remoteExists !== undefined
+        ? {
+            remoteExists: error.remoteExists,
+            remoteUpdatedAt: error.remoteUpdatedAt,
+            remoteIsDeleted: error.remoteIsDeleted,
+            detectedAt: now,
+            reason: failureReason,
+          }
+        : undefined);
+
     const dlqItem: DeadLetterItem = {
       dlqId,
       originalQueueId: queueItem.queueId,
@@ -1099,6 +1111,8 @@ class OfflineStorage {
       originatingUserId: 'userId' in queueItem ? (queueItem as OfflineMutation).userId : undefined,
       originatingUserRole: 'userRole' in queueItem ? (queueItem as OfflineMutation).userRole : undefined,
       schemaVersion: DLQ_SCHEMA_VERSION,
+      baseUpdatedAt: queueItem.baseUpdatedAt,
+      conflictDetails,
     };
 
     // Step 1: Persist into DLQ store first

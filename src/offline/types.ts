@@ -38,6 +38,9 @@ export interface OfflineQueueItem {
   lastError?: string;
 
   lastErrorCode?: string;
+
+  /** Authoritative remote or cached updatedAt when mutation was authored */
+  baseUpdatedAt?: string;
 }
 
 export interface OfflineSyncResult {
@@ -57,7 +60,7 @@ export interface OfflineStorageMetadata {
 }
 
 // =========================================================================
-// Phase 6 — Dead Letter Queue (DLQ) & Failure Management Contracts
+// Phase 6 & Phase 7 — Dead Letter Queue (DLQ) & Failure Management Contracts
 // =========================================================================
 
 export type DLQFailureReason =
@@ -66,7 +69,11 @@ export type DLQFailureReason =
   | 'security_rejection'
   | 'structural_validation_failed'
   | 'authentication_required'
-  | 'manual_quarantine';
+  | 'manual_quarantine'
+  | 'conflict_remote_newer'
+  | 'conflict_remote_deleted'
+  | 'conflict_create_collision'
+  | 'conflict_stale_delete';
 
 export const DLQ_SCHEMA_VERSION = 1;
 export const MAX_SYNC_RETRIES = 3;
@@ -121,6 +128,18 @@ export interface DeadLetterItem<T = unknown> {
 
   /** Schema version */
   schemaVersion: number;
+
+  /** Authoritative remote or cached updatedAt when mutation was authored */
+  baseUpdatedAt?: string;
+
+  /** Detailed diagnostic conflict snapshot if quarantine was triggered by conflict */
+  conflictDetails?: {
+    remoteExists: boolean;
+    remoteUpdatedAt?: string;
+    remoteIsDeleted?: boolean;
+    detectedAt: string;
+    reason: string;
+  };
 }
 
 export interface DLQStats {
@@ -465,6 +484,9 @@ export interface OfflineMutation<T = unknown> {
 
   /** Last error code if failed */
   lastErrorCode?: string;
+
+  /** Authoritative remote or cached updatedAt when mutation was authored */
+  baseUpdatedAt?: string;
 }
 
 /**
@@ -480,6 +502,7 @@ export interface CreateMutationParams<T = unknown> {
   clientGeneratedId?: boolean;
   idempotencyKey?: string;
   applyOptimistic?: boolean;
+  baseUpdatedAt?: string;
 }
 
 /**
@@ -595,3 +618,174 @@ export function isMutationAuthorized(
       return false;
   }
 }
+
+// =========================================================================
+// Phase 7 — Conflict Detection & Resolution Contracts
+// =========================================================================
+
+export interface ConflictDetectionResult {
+  hasConflict: boolean;
+  reason?: DLQFailureReason;
+  errorMessage?: string;
+  remoteUpdatedAt?: string;
+  remoteIsDeleted?: boolean;
+  remoteExists: boolean;
+}
+
+/**
+ * Deterministic Conflict Detection Helper for Offline Mutations replayed against Firestore.
+ *
+ * Evaluation Rules:
+ * 1. CREATE:
+ *    - If remote document exists and is NOT marked deleted: conflict_create_collision
+ *    - If remote document does not exist or is marked deleted: no conflict
+ * 2. UPDATE:
+ *    - If remote document does NOT exist: conflict_remote_deleted
+ *    - If remote document exists and is marked isDeleted: conflict_remote_deleted
+ *    - If remote updatedAt is newer than local baseUpdatedAt: conflict_remote_newer
+ *    - Otherwise: no conflict
+ * 3. DELETE:
+ *    - If remote document does NOT exist or is already marked isDeleted: no conflict (idempotent success)
+ *    - If remote updatedAt is newer than local baseUpdatedAt: conflict_stale_delete
+ *    - Otherwise: no conflict
+ *
+ * Safety Invariants:
+ * - If baseUpdatedAt or remote updatedAt is unavailable or malformed, no synthetic timestamp is fabricated.
+ * - Non-conflicting operations proceed safely to standard replay.
+ */
+export function detectMutationConflict(
+  mutation: {
+    operation: OfflineOperation;
+    baseUpdatedAt?: string;
+    createdAt?: string;
+    payload?: unknown;
+  },
+  remoteData: Record<string, any> | null | undefined,
+  remoteExists: boolean
+): ConflictDetectionResult {
+  const isRemoteDeleted = Boolean(
+    remoteData &&
+      (remoteData.isDeleted === true || remoteData.status === 'deleted' || remoteData.deleted === true)
+  );
+
+  const remoteUpdatedAt =
+    remoteData && typeof remoteData.updatedAt === 'string'
+      ? remoteData.updatedAt
+      : remoteData && typeof remoteData.createdAt === 'string'
+      ? remoteData.createdAt
+      : undefined;
+
+  // 1. CREATE Operation
+  if (mutation.operation === 'create') {
+    if (remoteExists && !isRemoteDeleted) {
+      return {
+        hasConflict: true,
+        reason: 'conflict_create_collision',
+        errorMessage: 'CREATE collision: Target document already exists on remote server and is active.',
+        remoteUpdatedAt,
+        remoteIsDeleted: false,
+        remoteExists: true,
+      };
+    }
+    return {
+      hasConflict: false,
+      remoteUpdatedAt,
+      remoteIsDeleted: isRemoteDeleted,
+      remoteExists,
+    };
+  }
+
+  // 2. UPDATE Operation
+  if (mutation.operation === 'update') {
+    if (!remoteExists) {
+      return {
+        hasConflict: true,
+        reason: 'conflict_remote_deleted',
+        errorMessage: 'UPDATE conflict: Remote target document does not exist or has been deleted.',
+        remoteUpdatedAt: undefined,
+        remoteIsDeleted: true,
+        remoteExists: false,
+      };
+    }
+
+    if (isRemoteDeleted) {
+      return {
+        hasConflict: true,
+        reason: 'conflict_remote_deleted',
+        errorMessage: 'UPDATE conflict: Remote target document is marked as deleted.',
+        remoteUpdatedAt,
+        remoteIsDeleted: true,
+        remoteExists: true,
+      };
+    }
+
+    // Check timestamp freshness if baseUpdatedAt and remoteUpdatedAt are both present and valid
+    if (mutation.baseUpdatedAt && remoteUpdatedAt) {
+      const baseTime = new Date(mutation.baseUpdatedAt).getTime();
+      const remoteTime = new Date(remoteUpdatedAt).getTime();
+
+      if (!isNaN(baseTime) && !isNaN(remoteTime) && remoteTime > baseTime) {
+        return {
+          hasConflict: true,
+          reason: 'conflict_remote_newer',
+          errorMessage: `UPDATE conflict: Remote document was modified (${remoteUpdatedAt}) after local baseline (${mutation.baseUpdatedAt}).`,
+          remoteUpdatedAt,
+          remoteIsDeleted: false,
+          remoteExists: true,
+        };
+      }
+    }
+
+    return {
+      hasConflict: false,
+      remoteUpdatedAt,
+      remoteIsDeleted: false,
+      remoteExists: true,
+    };
+  }
+
+  // 3. DELETE Operation
+  if (mutation.operation === 'delete') {
+    // If target document is already deleted or absent, treat as idempotent success (no conflict)
+    if (!remoteExists || isRemoteDeleted) {
+      return {
+        hasConflict: false,
+        remoteUpdatedAt,
+        remoteIsDeleted: true,
+        remoteExists,
+      };
+    }
+
+    // If remote was updated after local deletion intent was authored
+    if (mutation.baseUpdatedAt && remoteUpdatedAt) {
+      const baseTime = new Date(mutation.baseUpdatedAt).getTime();
+      const remoteTime = new Date(remoteUpdatedAt).getTime();
+
+      if (!isNaN(baseTime) && !isNaN(remoteTime) && remoteTime > baseTime) {
+        return {
+          hasConflict: true,
+          reason: 'conflict_stale_delete',
+          errorMessage: `DELETE conflict: Remote document was updated (${remoteUpdatedAt}) after local deletion intent (${mutation.baseUpdatedAt}).`,
+          remoteUpdatedAt,
+          remoteIsDeleted: false,
+          remoteExists: true,
+        };
+      }
+    }
+
+    return {
+      hasConflict: false,
+      remoteUpdatedAt,
+      remoteIsDeleted: false,
+      remoteExists: true,
+    };
+  }
+
+  return {
+    hasConflict: false,
+    remoteUpdatedAt,
+    remoteIsDeleted: isRemoteDeleted,
+    remoteExists,
+  };
+}
+
