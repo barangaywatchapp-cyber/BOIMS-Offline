@@ -20,6 +20,7 @@ import { storageService } from './storageService';
 import { offlineStorage } from '../offline/storage';
 import { offlineMutationQueue } from '../offline/mutationQueue';
 import { dlqService } from '../offline/dlqService';
+import { coordinationService } from '../offline/coordinationService';
 import {
   OfflineQueueItem,
   OfflineOperation,
@@ -232,6 +233,7 @@ class SyncService {
 
   /**
    * Process all pending items in the canonical IndexedDB sync queue sequentially.
+   * Phase 8 Multi-Tab Safety: Only one tab per browser profile may own replay.
    */
   public async processQueue(): Promise<{ processed: number; failed: number }> {
     if (this.isProcessing) {
@@ -241,6 +243,15 @@ class SyncService {
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       console.warn('[SyncService] Cannot process queue: Client is offline.');
+      return { processed: 0, failed: 0 };
+    }
+
+    // Phase 8: Acquire exclusive cross-tab replay lease
+    const acquired = await coordinationService.acquireLease();
+    if (!acquired) {
+      console.info(
+        `[SyncService] Replay blocked: Another browser tab holds the active coordination lease. (Current tab: ${coordinationService.getTabId()})`
+      );
       return { processed: 0, failed: 0 };
     }
 
@@ -261,9 +272,20 @@ class SyncService {
         return { processed: 0, failed: 0 };
       }
 
-      console.info(`[SyncService] Starting automatic replay of ${pendingItems.length} pending mutation(s)...`);
+      console.info(
+        `[SyncService] Starting automatic replay of ${pendingItems.length} pending mutation(s) under Tab ${coordinationService.getTabId()}...`
+      );
 
       for (const item of pendingItems) {
+        // Phase 8 Ownership Check: Stop processing immediately if lease was lost or expired
+        const isOwner = await coordinationService.verifyOwnership();
+        if (!isOwner) {
+          console.warn(
+            `[SyncService] Tab ${coordinationService.getTabId()} lost replay lease during processing. Halting replay loop immediately.`
+          );
+          break;
+        }
+
         // Re-check online status before each item
         if (typeof navigator !== 'undefined' && !navigator.onLine) {
           console.warn('[SyncService] Connection lost during replay. Suspending sync loop.');
@@ -273,6 +295,11 @@ class SyncService {
         // Validate recordId — invalid identifiers are permanently quarantined to DLQ
         if (!item.recordId || item.recordId === 'undefined' || item.recordId === 'null') {
           console.warn(`[SyncService] Moving invalid recordId item ${item.queueId} to DLQ.`);
+          const verifyBeforeDLQ = await coordinationService.verifyOwnership();
+          if (!verifyBeforeDLQ) {
+            console.warn('[SyncService] Aborting DLQ quarantine: replay ownership lost.');
+            break;
+          }
           await offlineStorage.moveToDLQ(item, 'structural_validation_failed', {
             code: 'invalid-argument',
             message: 'Invalid or missing recordId',
@@ -284,6 +311,11 @@ class SyncService {
         // Check retry limit — mutations exceeding max retries are quarantined to DLQ
         if (item.retryCount >= MAX_RETRIES) {
           console.warn(`[SyncService] Moving exhausted item ${item.queueId} (attempts: ${item.retryCount}) to DLQ.`);
+          const verifyBeforeDLQ = await coordinationService.verifyOwnership();
+          if (!verifyBeforeDLQ) {
+            console.warn('[SyncService] Aborting DLQ quarantine: replay ownership lost.');
+            break;
+          }
           await offlineStorage.moveToDLQ(item, 'max_retries_exceeded', {
             code: item.lastErrorCode || 'max_retries_exceeded',
             message: item.lastError || 'Max retries exceeded',
@@ -321,6 +353,11 @@ class SyncService {
               `[SyncService] Conflict detected (${conflictResult.reason}) for item ${item.queueId} on ${normalizedCollection}/${item.recordId}. Moving to DLQ:`,
               conflictResult.errorMessage
             );
+            const verifyBeforeConflictDLQ = await coordinationService.verifyOwnership();
+            if (!verifyBeforeConflictDLQ) {
+              console.warn('[SyncService] Aborting conflict DLQ quarantine: replay ownership lost.');
+              break;
+            }
             await offlineStorage.moveToDLQ(
               item,
               conflictResult.reason || 'permanent_error',
@@ -371,6 +408,13 @@ class SyncService {
             );
           }
 
+          // Phase 8: Verify ownership before destructive queue deletion
+          const verifyBeforeDelete = await coordinationService.verifyOwnership();
+          if (!verifyBeforeDelete) {
+            console.warn('[SyncService] Aborting queue deletion: replay ownership lost after remote write.');
+            break;
+          }
+
           // Remove resolved item from canonical IndexedDB queue
           await offlineStorage.deleteQueueItem(item.queueId);
           processed++;
@@ -393,6 +437,11 @@ class SyncService {
               errMsg
             );
 
+            const verifyBeforeErrDLQ = await coordinationService.verifyOwnership();
+            if (!verifyBeforeErrDLQ) {
+              console.warn('[SyncService] Aborting non-retryable DLQ quarantine: replay ownership lost.');
+              break;
+            }
             await offlineStorage.moveToDLQ(item, failureReason, err);
           } else {
             console.error(`[SyncService] Transient error syncing item ${item.queueId}:`, err);
@@ -400,6 +449,11 @@ class SyncService {
 
             if (item.retryCount >= MAX_RETRIES) {
               console.warn(`[SyncService] Max retries (${MAX_RETRIES}) reached for item ${item.queueId}. Moving to DLQ.`);
+              const verifyBeforeMaxDLQ = await coordinationService.verifyOwnership();
+              if (!verifyBeforeMaxDLQ) {
+                console.warn('[SyncService] Aborting max retries DLQ quarantine: replay ownership lost.');
+                break;
+              }
               await offlineStorage.moveToDLQ(item, 'max_retries_exceeded', err);
             } else {
               const backoffMs = calculateBackoffDelay(item.retryCount);
@@ -417,6 +471,7 @@ class SyncService {
     } catch (loopErr) {
       console.error('[SyncService] Unexpected error during processQueue execution:', loopErr);
     } finally {
+      await coordinationService.releaseLease();
       this.isProcessing = false;
       await this.refreshMemoryQueue();
     }
@@ -434,8 +489,20 @@ class SyncService {
 
   /**
    * Retry a single failed or pending queue item.
+   * Phase 8 Multi-Tab Safety: Protected under coordination lease.
    */
   public async retryItem(queueId: string): Promise<boolean> {
+    const isOwnerAlready = await coordinationService.verifyOwnership();
+    let acquiredHere = false;
+
+    if (!isOwnerAlready) {
+      acquiredHere = await coordinationService.acquireLease();
+      if (!acquiredHere) {
+        console.warn(`[SyncService] retryItem blocked: Another tab holds active replay lease.`);
+        return false;
+      }
+    }
+
     try {
       const item = await offlineStorage.getQueueItem(queueId);
       if (!item) return false;
@@ -467,6 +534,11 @@ class SyncService {
           `[SyncService] Conflict detected during retry (${conflictResult.reason}) for item ${item.queueId}. Quarantining to DLQ:`,
           conflictResult.errorMessage
         );
+        const verifyOwnershipBeforeDLQ = await coordinationService.verifyOwnership();
+        if (!verifyOwnershipBeforeDLQ) {
+          console.warn('[SyncService] Aborting retry DLQ move: ownership lost.');
+          return false;
+        }
         await offlineStorage.moveToDLQ(
           item,
           conflictResult.reason || 'permanent_error',
@@ -517,6 +589,13 @@ class SyncService {
         );
       }
 
+      // Phase 8: Verify ownership before deleting from queue
+      const verifyOwnershipBeforeDelete = await coordinationService.verifyOwnership();
+      if (!verifyOwnershipBeforeDelete) {
+        console.warn('[SyncService] Aborting queue deletion after retry: ownership lost.');
+        return false;
+      }
+
       // Remove from queue
       await offlineStorage.deleteQueueItem(queueId);
       await this.refreshMemoryQueue();
@@ -549,6 +628,10 @@ class SyncService {
 
       await this.refreshMemoryQueue();
       return false;
+    } finally {
+      if (acquiredHere) {
+        await coordinationService.releaseLease();
+      }
     }
   }
 

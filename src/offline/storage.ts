@@ -18,6 +18,7 @@ import type {
   DeadLetterItem,
   DLQFailureReason,
   OfflineMutation,
+  ReplayCoordinationLease,
 } from './types';
 import {
   sanitizeUserForOfflineSession,
@@ -25,6 +26,9 @@ import {
   OFFLINE_SESSION_TTL_MS,
   OFFLINE_SESSION_SCHEMA_VERSION,
   DLQ_SCHEMA_VERSION,
+  COORDINATION_LEASE_KEY,
+  DEFAULT_LEASE_DURATION_MS,
+  COORDINATION_SCHEMA_VERSION,
 } from './types';
 
 const DB_NAME = 'boims-offline';
@@ -1144,6 +1148,273 @@ class OfflineStorage {
       return false;
     }
   }
+
+  // =========================================================================
+  // Phase 8 — Multi-Tab Replay Coordination & Lease Methods
+  // =========================================================================
+
+  /**
+   * Retrieve the active ReplayCoordinationLease from 'offlineMetadata' store.
+   */
+  async getReplayLease(): Promise<ReplayCoordinationLease | null> {
+    const db = await this.openDatabase();
+
+    if (!db.objectStoreNames.contains(METADATA_STORE)) {
+      return null;
+    }
+
+    return new Promise<ReplayCoordinationLease | null>((resolve, reject) => {
+      const transaction = db.transaction(METADATA_STORE, 'readonly');
+      const store = transaction.objectStore(METADATA_STORE);
+
+      const request = store.get(COORDINATION_LEASE_KEY);
+
+      request.onsuccess = () => {
+        const record = (request.result as ReplayCoordinationLease | undefined) ?? null;
+        resolve(record);
+      };
+
+      request.onerror = () => {
+        reject(
+          request.error ??
+            new Error('Failed to read replay coordination lease.')
+        );
+      };
+    });
+  }
+
+  /**
+   * Persists or updates the ReplayCoordinationLease in 'offlineMetadata'.
+   */
+  async putReplayLease(lease: ReplayCoordinationLease): Promise<void> {
+    const db = await this.openDatabase();
+
+    return new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(METADATA_STORE, 'readwrite');
+      const store = transaction.objectStore(METADATA_STORE);
+
+      store.put(lease);
+
+      transaction.oncomplete = () => resolve();
+
+      transaction.onerror = () => {
+        reject(
+          transaction.error ??
+            new Error('Failed to persist replay coordination lease.')
+        );
+      };
+
+      transaction.onabort = () => {
+        reject(
+          transaction.error ??
+            new Error('Replay coordination lease transaction was aborted.')
+        );
+      };
+    });
+  }
+
+  /**
+   * Removes the ReplayCoordinationLease from 'offlineMetadata'.
+   */
+  async deleteReplayLease(): Promise<void> {
+    const db = await this.openDatabase();
+
+    if (!db.objectStoreNames.contains(METADATA_STORE)) {
+      return;
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(METADATA_STORE, 'readwrite');
+      const store = transaction.objectStore(METADATA_STORE);
+
+      store.delete(COORDINATION_LEASE_KEY);
+
+      transaction.oncomplete = () => resolve();
+
+      transaction.onerror = () => {
+        reject(
+          transaction.error ??
+            new Error('Failed to delete replay coordination lease.')
+        );
+      };
+
+      transaction.onabort = () => {
+        reject(
+          transaction.error ??
+            new Error('Delete replay lease transaction was aborted.')
+        );
+      };
+    });
+  }
+
+  /**
+   * Atomically attempts to acquire the replay lease for tabId.
+   * If an active unexpired lease exists for a different tabId, returns { acquired: false, lease: currentLease }.
+   * If no lease exists, or existing lease is expired, or already owned by tabId,
+   * writes the updated lease atomically and returns { acquired: true, lease: newLease }.
+   */
+  async tryAcquireReplayLease(
+    tabId: string,
+    durationMs: number = DEFAULT_LEASE_DURATION_MS
+  ): Promise<{ acquired: boolean; lease: ReplayCoordinationLease | null }> {
+    const db = await this.openDatabase();
+
+    return new Promise<{ acquired: boolean; lease: ReplayCoordinationLease | null }>((resolve, reject) => {
+      const transaction = db.transaction(METADATA_STORE, 'readwrite');
+      const store = transaction.objectStore(METADATA_STORE);
+
+      const request = store.get(COORDINATION_LEASE_KEY);
+
+      request.onsuccess = () => {
+        const existing = (request.result as ReplayCoordinationLease | undefined) ?? null;
+        const now = Date.now();
+
+        if (existing) {
+          const isExpired = new Date(existing.expiresAt).getTime() <= now;
+          const isOwner = existing.tabId === tabId;
+
+          // If active and owned by another tab -> acquisition rejected
+          if (!isExpired && !isOwner) {
+            resolve({ acquired: false, lease: existing });
+            return;
+          }
+        }
+
+        // Available or expired or owned -> create / refresh lease
+        const acquiredAt = existing && existing.tabId === tabId ? existing.acquiredAt : new Date(now).toISOString();
+        const renewedAt = new Date(now).toISOString();
+        const expiresAt = new Date(now + durationMs).toISOString();
+
+        const newLease: ReplayCoordinationLease = {
+          key: COORDINATION_LEASE_KEY,
+          tabId,
+          acquiredAt,
+          renewedAt,
+          expiresAt,
+          leaseDurationMs: durationMs,
+          schemaVersion: COORDINATION_SCHEMA_VERSION,
+        };
+
+        store.put(newLease);
+        resolve({ acquired: true, lease: newLease });
+      };
+
+      request.onerror = () => {
+        reject(
+          request.error ??
+            new Error('Failed during tryAcquireReplayLease.')
+        );
+      };
+
+      transaction.onerror = () => {
+        reject(
+          transaction.error ??
+            new Error('Transaction error during tryAcquireReplayLease.')
+        );
+      };
+    });
+  }
+
+  /**
+   * Atomically renews the lease heartbeat for tabId if and only if tabId currently owns the lease.
+   */
+  async renewReplayLease(
+    tabId: string,
+    durationMs: number = DEFAULT_LEASE_DURATION_MS
+  ): Promise<boolean> {
+    const db = await this.openDatabase();
+
+    return new Promise<boolean>((resolve, reject) => {
+      const transaction = db.transaction(METADATA_STORE, 'readwrite');
+      const store = transaction.objectStore(METADATA_STORE);
+
+      const request = store.get(COORDINATION_LEASE_KEY);
+
+      request.onsuccess = () => {
+        const existing = (request.result as ReplayCoordinationLease | undefined) ?? null;
+        if (!existing || existing.tabId !== tabId) {
+          resolve(false);
+          return;
+        }
+
+        const now = Date.now();
+        const updatedLease: ReplayCoordinationLease = {
+          ...existing,
+          renewedAt: new Date(now).toISOString(),
+          expiresAt: new Date(now + durationMs).toISOString(),
+          leaseDurationMs: durationMs,
+        };
+
+        store.put(updatedLease);
+        resolve(true);
+      };
+
+      request.onerror = () => {
+        reject(
+          request.error ??
+            new Error('Failed to renew replay lease.')
+        );
+      };
+
+      transaction.onerror = () => {
+        reject(
+          transaction.error ??
+            new Error('Transaction error during renewReplayLease.')
+        );
+      };
+    });
+  }
+
+  /**
+   * Atomically releases the lease if owned by tabId.
+   */
+  async releaseReplayLease(tabId: string): Promise<boolean> {
+    const db = await this.openDatabase();
+
+    return new Promise<boolean>((resolve, reject) => {
+      const transaction = db.transaction(METADATA_STORE, 'readwrite');
+      const store = transaction.objectStore(METADATA_STORE);
+
+      const request = store.get(COORDINATION_LEASE_KEY);
+
+      request.onsuccess = () => {
+        const existing = (request.result as ReplayCoordinationLease | undefined) ?? null;
+        if (!existing || existing.tabId !== tabId) {
+          resolve(false);
+          return;
+        }
+
+        store.delete(COORDINATION_LEASE_KEY);
+        resolve(true);
+      };
+
+      request.onerror = () => {
+        reject(
+          request.error ??
+            new Error('Failed to release replay lease.')
+        );
+      };
+
+      transaction.onerror = () => {
+        reject(
+          transaction.error ??
+            new Error('Transaction error during releaseReplayLease.')
+        );
+      };
+    });
+  }
+
+  /**
+   * Resets all offline data stores (used for clean resets and test suites).
+   */
+  async clearAllData(): Promise<void> {
+    await this.clearQueue();
+    await this.clearAllCachedEntities();
+    await this.clearDLQ();
+    await this.deleteReplayLease();
+    await this.clearSession();
+  }
 }
 
 export const offlineStorage = new OfflineStorage();
+

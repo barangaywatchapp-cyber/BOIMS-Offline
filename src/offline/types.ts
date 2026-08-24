@@ -789,3 +789,58 @@ export function detectMutationConflict(
   };
 }
 
+// =========================================================================
+// Phase 8 — Multi-Tab Coordination & Cross-Tab Mutation Safety Contracts
+// =========================================================================
+
+export const COORDINATION_LEASE_KEY = 'replay_coordination_lease';
+export const DEFAULT_LEASE_DURATION_MS = 10000; // 10 seconds lease TTL
+export const DEFAULT_HEARTBEAT_INTERVAL_MS = 3000; // 3 seconds heartbeat renewal
+export const COORDINATION_SCHEMA_VERSION = 1;
+
+/**
+ * Durable Replay Coordination Lease record stored in IndexedDB 'offlineMetadata'.
+ * Authoritative single source of truth for replay ownership across browser tabs.
+ */
+export interface ReplayCoordinationLease {
+  /** Fixed key: 'replay_coordination_lease' */
+  key: string;
+
+  /** Unique identifier of the tab holding the active lease */
+  tabId: string;
+
+  /** ISO timestamp when the lease was originally acquired */
+  acquiredAt: string;
+
+  /** ISO timestamp of the last successful heartbeat renewal */
+  renewedAt: string;
+
+  /** ISO timestamp when the current lease expires if not renewed */
+  expiresAt: string;
+
+  /** Lease validity duration in milliseconds */
+  leaseDurationMs: number;
+
+  /** Schema version */
+  schemaVersion: number;
+}
+
+export type CoordinationSignalType =
+  | 'lease_acquired'
+  | 'lease_released'
+  | 'lease_renewed'
+  | 'lease_lost'
+  | 'queue_changed';
+
+/**
+ * Non-durable BroadcastChannel message format for real-time tab notification.
+ * BroadcastChannel is solely a signaling optimization; IndexedDB remains authoritative.
+ */
+export interface CoordinationSignalMessage {
+  type: CoordinationSignalType;
+  tabId: string;
+  timestamp: string;
+  expiresAt?: string;
+  details?: Record<string, unknown>;
+}
+
