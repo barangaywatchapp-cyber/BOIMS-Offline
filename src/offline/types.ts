@@ -6,6 +6,8 @@
  * Existing services are not modified yet.
  */
 
+import type { SyncQueueItem, User } from '../types';
+
 export type OfflineOperation = 'create' | 'update' | 'delete';
 
 export type OfflineItemStatus =
@@ -52,4 +54,544 @@ export interface OfflineStorageMetadata {
   lastUpdatedAt: string;
 
   deviceId?: string;
+}
+
+// =========================================================================
+// Phase 6 — Dead Letter Queue (DLQ) & Failure Management Contracts
+// =========================================================================
+
+export type DLQFailureReason =
+  | 'max_retries_exceeded'
+  | 'permanent_error'
+  | 'security_rejection'
+  | 'structural_validation_failed'
+  | 'authentication_required'
+  | 'manual_quarantine';
+
+export const DLQ_SCHEMA_VERSION = 1;
+export const MAX_SYNC_RETRIES = 3;
+
+/**
+ * Standard Dead Letter Queue Record.
+ * Retains complete diagnostic, failure, and payload context for inspection
+ * and authorized manual recovery without storing credentials or secrets.
+ */
+export interface DeadLetterItem<T = unknown> {
+  /** Unique DLQ identifier (e.g., DLQ-1724490000000-abcde) */
+  dlqId: string;
+
+  /** Original queueId from OfflineQueueItem / OfflineMutation */
+  originalQueueId: string;
+
+  /** Target mutation operation */
+  operation: OfflineOperation;
+
+  /** Target Firestore collection name */
+  collectionName: OfflineMutableCollection;
+
+  /** Target document / record identifier */
+  recordId: string;
+
+  /** Mutation payload */
+  payload: T;
+
+  /** ISO creation timestamp when the mutation was originally created */
+  originalCreatedAt: string;
+
+  /** ISO timestamp when the mutation was moved to the DLQ */
+  failedAt: string;
+
+  /** Total retry attempts made before quarantine */
+  retryCount: number;
+
+  /** Human-readable error message */
+  lastError?: string;
+
+  /** Machine-readable error code */
+  lastErrorCode?: string;
+
+  /** Categorized failure reason */
+  failureReason: DLQFailureReason;
+
+  /** UID of the originating author */
+  originatingUserId?: string;
+
+  /** Role of the originating author */
+  originatingUserRole?: string;
+
+  /** Schema version */
+  schemaVersion: number;
+}
+
+export interface DLQStats {
+  totalFailed: number;
+  lastFailedAt: string | null;
+  byCollection: Record<string, number>;
+  byReason: Record<DLQFailureReason, number>;
+}
+
+export interface BackoffConfig {
+  baseDelayMs: number;
+  maxDelayMs: number;
+  jitterFactor: number;
+}
+
+export const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
+  baseDelayMs: 1000,
+  maxDelayMs: 30000,
+  jitterFactor: 0.2,
+};
+
+/**
+ * Calculates exponential backoff delay with jitter to prevent retry storms.
+ * delay = min(maxDelay, baseDelay * 2^(retryCount - 1)) * (1 +/- jitter)
+ */
+export function calculateBackoffDelay(
+  retryCount: number,
+  config: Partial<BackoffConfig> = {}
+): number {
+  const merged: BackoffConfig = { ...DEFAULT_BACKOFF_CONFIG, ...config };
+  if (retryCount <= 0) {
+    return 0;
+  }
+
+  const exponential = merged.baseDelayMs * Math.pow(2, Math.min(retryCount - 1, 6));
+  const bounded = Math.min(exponential, merged.maxDelayMs);
+  const jitterRange = bounded * merged.jitterFactor;
+  const jitter = (Math.random() * 2 - 1) * jitterRange;
+
+  return Math.max(0, Math.round(bounded + jitter));
+}
+
+/**
+ * Classifies whether an error is non-retryable / permanent.
+ */
+export function isPermanentError(error: any): boolean {
+  if (!error) return false;
+  const code = (error?.code || '').toLowerCase();
+  const msg = (error?.message || String(error)).toLowerCase();
+
+  return (
+    code === 'permission-denied' ||
+    code === 'unauthenticated' ||
+    code === 'invalid-argument' ||
+    code === 'not-found' ||
+    code === 'already-exists' ||
+    code === 'failed-precondition' ||
+    msg.includes('missing or insufficient permissions') ||
+    msg.includes('permission denied') ||
+    msg.includes('unauthenticated') ||
+    msg.includes('invalid recordid') ||
+    msg.includes('invalid argument')
+  );
+}
+
+/**
+ * Classifies whether an error is transient / retryable.
+ */
+export function isTransientError(error: any): boolean {
+  if (!error) return false;
+  if (isPermanentError(error)) return false;
+
+  const code = (error?.code || '').toLowerCase();
+  const msg = (error?.message || String(error)).toLowerCase();
+
+  return (
+    code === 'unavailable' ||
+    code === 'deadline-exceeded' ||
+    code === 'resource-exhausted' ||
+    code === 'network-error' ||
+    code === 'aborted' ||
+    msg.includes('network') ||
+    msg.includes('timeout') ||
+    msg.includes('unavailable') ||
+    msg.includes('offline')
+  );
+}
+
+/**
+ * Phase 2 — Generic Cache Data Contract
+ * Encapsulates cached documents for offline reads.
+ */
+export interface CachedEntity<T = unknown> {
+  /** Unique key: `${collectionName}:${recordId}` */
+  id: string;
+
+  /** Name of the entity/collection (e.g., 'reports', 'announcements') */
+  collectionName: string;
+
+  /** Unique document ID */
+  recordId: string;
+
+  /** Stored document data */
+  data: T;
+
+  /** ISO timestamp when the record was cached locally */
+  cachedAt: string;
+
+  /** ISO timestamp when the record was created/updated remotely (if known) */
+  updatedAt?: string;
+
+  /** Optional version or checksum */
+  version?: number | string;
+}
+
+/**
+ * Phase 3 — Offline Session Persistence Contract
+ */
+export type OfflineSessionState =
+  | 'online_authenticated'
+  | 'offline_available'
+  | 'expired';
+
+export const OFFLINE_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days in milliseconds
+export const OFFLINE_SESSION_SCHEMA_VERSION = 1;
+
+export interface OfflineSessionRecord {
+  /** Firebase User UID */
+  uid: string;
+
+  /** Sanitized User profile projection */
+  user: User;
+
+  /** Current session state */
+  sessionState: OfflineSessionState;
+
+  /** ISO timestamp of last successful online authentication */
+  authenticatedAt: string;
+
+  /** ISO timestamp of last active user interaction */
+  lastActiveAt: string;
+
+  /** ISO timestamp when this offline session expires */
+  expiresAt: string;
+
+  /** Schema version */
+  schemaVersion: number;
+}
+
+/**
+ * Strips any sensitive data, secrets, or large blobs before offline persistence.
+ */
+export function sanitizeUserForOfflineSession(user: User): User {
+  return {
+    uid: user.uid,
+    boimsId: user.boimsId,
+    householdId: user.householdId,
+    householdNumber: user.householdNumber,
+    email: user.email,
+    firstName: user.firstName,
+    middleName: user.middleName,
+    lastName: user.lastName,
+    suffix: user.suffix,
+    fullName: user.fullName,
+    phoneNumber: user.phoneNumber,
+    address: user.address,
+    purok: user.purok,
+    jurisdiction: user.jurisdiction,
+    barangay: user.barangay,
+    municipality: user.municipality,
+    province: user.province,
+    postalCode: user.postalCode,
+    birthDate: user.birthDate,
+    gender: user.gender,
+    civilStatus: user.civilStatus,
+    occupation: user.occupation,
+    voterStatus: user.voterStatus,
+    role: user.role,
+    dutyStatus: user.dutyStatus,
+    dutyMode: user.dutyMode,
+    presence: user.presence,
+    status: user.status,
+    emailVerified: user.emailVerified,
+    mustChangePassword: user.mustChangePassword,
+    isActive: user.isActive,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    lastLoginAt: user.lastLoginAt,
+    isDeleted: user.isDeleted,
+    deletedAt: user.deletedAt,
+  };
+}
+
+/**
+ * Validates an offline session record against structural, validity, and expiration rules.
+ */
+export function isOfflineSessionValid(
+  session: OfflineSessionRecord | null | undefined,
+  nowMs: number = Date.now()
+): boolean {
+  if (!session || typeof session !== 'object') {
+    return false;
+  }
+
+  if (
+    !session.uid ||
+    typeof session.uid !== 'string' ||
+    session.uid.trim() === ''
+  ) {
+    return false;
+  }
+
+  if (!session.user || typeof session.user !== 'object' || !session.user.role) {
+    return false;
+  }
+
+  if (session.sessionState === 'expired') {
+    return false;
+  }
+
+  if (!session.expiresAt) {
+    return false;
+  }
+
+  const expiresTime = new Date(session.expiresAt).getTime();
+  if (isNaN(expiresTime) || expiresTime <= nowMs) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Adapter converting legacy SyncQueueItem to standard OfflineQueueItem.
+ * Preserves existing properties without modifying legacy SyncService.
+ */
+export function toOfflineQueueItem(legacy: SyncQueueItem): OfflineQueueItem {
+  return {
+    queueId: legacy.queueId,
+    operation: legacy.operationType,
+    collectionName: legacy.collectionName,
+    recordId: legacy.recordId,
+    payload: legacy.payload,
+    createdAt: legacy.timestamp,
+    updatedAt: legacy.timestamp,
+    retryCount: legacy.retryCount,
+    status: legacy.status,
+    lastError: legacy.errorMessage,
+    lastErrorCode: legacy.errorCode,
+  };
+}
+
+/**
+ * Adapter converting standard OfflineQueueItem to legacy SyncQueueItem.
+ * Preserves backward compatibility with legacy consumers.
+ */
+export function toSyncQueueItem(item: OfflineQueueItem): SyncQueueItem {
+  return {
+    queueId: item.queueId,
+    operationType: item.operation,
+    collectionName: item.collectionName,
+    recordId: item.recordId,
+    payload: item.payload,
+    timestamp: item.createdAt,
+    retryCount: item.retryCount,
+    status: item.status,
+    errorMessage: item.lastError,
+    errorCode: item.lastErrorCode,
+  };
+}
+
+// =========================================================================
+// Phase 4 — Offline CRUD & Mutation Queue Contracts
+// =========================================================================
+
+/**
+ * Collections audited and verified as safe for offline mutations.
+ */
+export const OFFLINE_MUTABLE_COLLECTIONS = [
+  'reports',
+  'announcements',
+  'certificates',
+  'certificateRequests',
+  'blotterCases',
+  'inventory',
+] as const;
+
+export type OfflineMutableCollection =
+  | (typeof OFFLINE_MUTABLE_COLLECTIONS)[number]
+  | string;
+
+/**
+ * Standard Phase 4 Offline Mutation Contract.
+ * Extends standard OfflineQueueItem with user context, client-generated tracking,
+ * optimistic flags, and idempotency key.
+ */
+export interface OfflineMutation<T = unknown> {
+  /** Unique queue mutation identifier (e.g., MUT-1724490000000-abcde) */
+  queueId: string;
+
+  /** Mutation operation */
+  operation: OfflineOperation;
+
+  /** Target Firestore collection name */
+  collectionName: OfflineMutableCollection;
+
+  /** Target document / record identifier */
+  recordId: string;
+
+  /** Data payload for the mutation */
+  payload: T;
+
+  /** ISO creation timestamp */
+  createdAt: string;
+
+  /** ISO last updated timestamp */
+  updatedAt: string;
+
+  /** Number of retry attempts (0 initially) */
+  retryCount: number;
+
+  /** Processing status */
+  status: OfflineItemStatus;
+
+  /** UID of the user who authored the mutation */
+  userId?: string;
+
+  /** Role of the user who authored the mutation */
+  userRole?: string;
+
+  /** Whether the mutation ID was generated client-side */
+  clientGeneratedId?: boolean;
+
+  /** Idempotency key to avoid duplicate submissions */
+  idempotencyKey?: string;
+
+  /** Flag indicating local optimistic cache application */
+  optimistic?: boolean;
+
+  /** Last error message if failed */
+  lastError?: string;
+
+  /** Last error code if failed */
+  lastErrorCode?: string;
+}
+
+/**
+ * Input parameters to enqueue an offline mutation.
+ */
+export interface CreateMutationParams<T = unknown> {
+  operation: OfflineOperation;
+  collectionName: OfflineMutableCollection;
+  recordId: string;
+  payload: T;
+  userId?: string;
+  userRole?: string;
+  clientGeneratedId?: boolean;
+  idempotencyKey?: string;
+  applyOptimistic?: boolean;
+}
+
+/**
+ * Validates the structural integrity of an offline mutation.
+ */
+export function validateOfflineMutation(
+  mutation: Partial<OfflineMutation>
+): { valid: boolean; error?: string } {
+  if (!mutation || typeof mutation !== 'object') {
+    return { valid: false, error: 'Mutation must be a non-null object.' };
+  }
+
+  if (!mutation.queueId || typeof mutation.queueId !== 'string' || mutation.queueId.trim() === '') {
+    return { valid: false, error: 'Mutation queueId is required.' };
+  }
+
+  if (
+    !mutation.operation ||
+    !['create', 'update', 'delete'].includes(mutation.operation)
+  ) {
+    return {
+      valid: false,
+      error: `Invalid mutation operation: ${mutation.operation}. Must be create, update, or delete.`,
+    };
+  }
+
+  if (
+    !mutation.collectionName ||
+    typeof mutation.collectionName !== 'string' ||
+    mutation.collectionName.trim() === ''
+  ) {
+    return { valid: false, error: 'Mutation collectionName is required.' };
+  }
+
+  if (
+    !mutation.recordId ||
+    typeof mutation.recordId !== 'string' ||
+    mutation.recordId.trim() === '' ||
+    mutation.recordId === 'undefined' ||
+    mutation.recordId === 'null'
+  ) {
+    return { valid: false, error: 'Mutation recordId must be a valid, non-empty identifier.' };
+  }
+
+  if (mutation.operation !== 'delete' && (mutation.payload === undefined || mutation.payload === null)) {
+    return { valid: false, error: 'Mutation payload is required for create and update operations.' };
+  }
+
+  if (!mutation.createdAt || isNaN(new Date(mutation.createdAt).getTime())) {
+    return { valid: false, error: 'Mutation createdAt must be a valid ISO date string.' };
+  }
+
+  return { valid: true };
+}
+
+/**
+ * Validates whether the given user has authorization to perform the specified offline mutation.
+ * Enforces strict role-based access control matching BOIMS security rules.
+ */
+export function isMutationAuthorized(
+  mutation: Partial<CreateMutationParams>,
+  user: User | null
+): boolean {
+  if (!user || !user.role || user.isDeleted || user.status === 'suspended') {
+    return false;
+  }
+
+  const role = user.role;
+  const isPrivilegedAdmin =
+    role === 'admin' ||
+    role === 'superAdmin' ||
+    role === 'chairman' ||
+    role === 'developer';
+
+  if (isPrivilegedAdmin) {
+    return true;
+  }
+
+  const collection = mutation.collectionName;
+  const operation = mutation.operation;
+
+  switch (collection) {
+    case 'reports':
+      // Any authenticated active resident or official can create and update reports
+      if (operation === 'create') return true;
+      if (operation === 'update') return true;
+      if (operation === 'delete') return role === 'secretary';
+      return false;
+
+    case 'announcements':
+      // Only authorized officials can create, update, or delete announcements
+      return role === 'secretary';
+
+    case 'certificates':
+    case 'certificateRequests':
+      // Residents can request (create), secretary can update/process/delete
+      if (operation === 'create') return true;
+      if (operation === 'update') return role === 'secretary';
+      if (operation === 'delete') return role === 'secretary';
+      return false;
+
+    case 'blotterCases':
+      // Barangay officials and tanods can create/update blotters
+      if (operation === 'create' || operation === 'update') {
+        return role === 'purokOfficial' || role === 'secretary';
+      }
+      return role === 'secretary';
+
+    case 'inventory':
+      return role === 'secretary';
+
+    default:
+      return false;
+  }
 }

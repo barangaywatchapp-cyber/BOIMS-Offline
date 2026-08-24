@@ -16,6 +16,15 @@ import { ensureUserBoimsId, syncBoimsIndexMetadata } from '../utils/boimsIdUtils
 import { syncService } from '../services/SyncService';
 import { fcmClientService } from '../services/fcmClientService';
 import { certificateService } from '../services/certificateService';
+import { offlineStorage } from '../offline/storage';
+import {
+  OfflineSessionRecord,
+  OfflineSessionState,
+  sanitizeUserForOfflineSession,
+  isOfflineSessionValid,
+  OFFLINE_SESSION_TTL_MS,
+  OFFLINE_SESSION_SCHEMA_VERSION,
+} from '../offline/types';
 
 interface AuthContextType {
   user: User | null;
@@ -54,40 +63,7 @@ function safeSetUserLocalStorage(user: User | null): void {
 
   try {
     // Construct an explicit lightweight projection containing only essential scalar fields required for app bootstrap & role checks
-    const cleanUserProjection: User = {
-      uid: user.uid,
-      boimsId: user.boimsId,
-      householdId: user.householdId,
-      email: user.email || '',
-      firstName: user.firstName || '',
-      middleName: user.middleName || '',
-      lastName: user.lastName || '',
-      suffix: user.suffix || '',
-      fullName: user.fullName || `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'User',
-      phoneNumber: user.phoneNumber || '',
-      address: user.address || '',
-      purok: user.purok || '',
-      jurisdiction: user.jurisdiction || user.purok || user.barangay || '',
-      barangay: user.barangay || '',
-      municipality: user.municipality || '',
-      province: user.province || '',
-      postalCode: user.postalCode || '',
-      role: user.role,
-      dutyStatus: user.dutyStatus || 'offDuty',
-      dutyMode: user.dutyMode || 'offDuty',
-      presence: user.presence ? { status: user.presence.status, lastSeen: user.presence.lastSeen } : undefined,
-      status: user.status || 'active',
-      emailVerified: Boolean(user.emailVerified),
-      mustChangePassword: Boolean(user.mustChangePassword),
-      isActive: Boolean(user.isActive),
-      createdAt: user.createdAt || new Date().toISOString(),
-      updatedAt: user.updatedAt || new Date().toISOString(),
-      isDeleted: Boolean(user.isDeleted),
-      // Strictly omit profilePicture if it's a base64 Data URL or exceeds 500 characters
-      ...(user.profilePicture && !user.profilePicture.startsWith('data:') && user.profilePicture.length <= 500
-        ? { profilePicture: user.profilePicture }
-        : {}),
-    };
+    const cleanUserProjection: User = sanitizeUserForOfflineSession(user);
 
     const jsonString = JSON.stringify(cleanUserProjection);
     const sizeInBytes = jsonString.length;
@@ -112,6 +88,30 @@ function safeSetUserLocalStorage(user: User | null): void {
     try {
       localStorage.removeItem(AUTH_STORAGE_KEY);
     } catch (_) {}
+  }
+}
+
+/**
+ * Persists or updates the active offline session record in IndexedDB.
+ */
+async function persistOfflineSession(
+  userData: User,
+  sessionState: OfflineSessionState = 'online_authenticated'
+): Promise<void> {
+  try {
+    const now = new Date();
+    const sessionRecord: OfflineSessionRecord = {
+      uid: userData.uid,
+      user: sanitizeUserForOfflineSession(userData),
+      sessionState,
+      authenticatedAt: now.toISOString(),
+      lastActiveAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + OFFLINE_SESSION_TTL_MS).toISOString(),
+      schemaVersion: OFFLINE_SESSION_SCHEMA_VERSION,
+    };
+    await offlineStorage.saveSession(sessionRecord);
+  } catch (err) {
+    console.warn('[AuthContext] Failed to persist offline session to IndexedDB:', err);
   }
 }
 
@@ -183,6 +183,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState<boolean>(false);
   const [isAuthInitialized, setIsAuthInitialized] = useState<boolean>(false);
 
+  // Attempt to restore offline session from IndexedDB if not found in state on mount
+  useEffect(() => {
+    let isMounted = true;
+    offlineStorage
+      .getSession()
+      .then((session) => {
+        if (!isMounted) return;
+        if (session && isOfflineSessionValid(session)) {
+          setUser((prev) => {
+            if (!prev) {
+              safeSetUserLocalStorage(session.user);
+              return session.user;
+            }
+            return prev;
+          });
+        }
+      })
+      .catch((err) => {
+        console.warn('[AuthContext] Error checking stored offline session:', err);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   useEffect(() => {
     let unsubUserDoc: (() => void) | null = null;
 
@@ -196,82 +222,142 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (firebaseUser) {
         try {
           const userDocRef = doc(db, 'users', firebaseUser.uid);
-          unsubUserDoc = onSnapshot(userDocRef, async (snap) => {
-            if (snap.exists()) {
-              const userData = { uid: snap.id, ...snap.data() } as User;
-              if (!userData.boimsId) {
-                const assignedBoimsId = await ensureUserBoimsId(userData);
-                if (assignedBoimsId) {
-                  userData.boimsId = assignedBoimsId;
+          unsubUserDoc = onSnapshot(
+            userDocRef,
+            async (snap) => {
+              if (snap.exists()) {
+                const userData = { uid: snap.id, ...snap.data() } as User;
+                if (!userData.boimsId) {
+                  const assignedBoimsId = await ensureUserBoimsId(userData);
+                  if (assignedBoimsId) {
+                    userData.boimsId = assignedBoimsId;
+                  }
+                } else {
+                  syncBoimsIndexMetadata(userData.uid, userData).catch(() => {});
                 }
+                safeSetUserLocalStorage(userData);
+                persistOfflineSession(userData, 'online_authenticated').catch(() => {});
+                setUser((prev) => {
+                  if (areUsersEquivalent(prev, userData)) {
+                    return prev;
+                  }
+                  return userData;
+                });
               } else {
-                syncBoimsIndexMetadata(userData.uid, userData).catch(() => {});
-              }
-              safeSetUserLocalStorage(userData);
-              setUser((prev) => {
-                if (areUsersEquivalent(prev, userData)) {
-                  return prev;
+                // Ignore cache-only non-existence snapshots to prevent premature registration fallback
+                if ((snap as any).metadata?.fromCache) {
+                  return;
                 }
-                return userData;
-              });
-            } else {
-              // Ignore cache-only non-existence snapshots to prevent premature registration fallback
-              if ((snap as any).metadata?.fromCache) {
-                return;
-              }
 
-              // Check registration document directly by ID if users/{uid} does not exist on server
-              let regData: any = null;
+                // Check registration document directly by ID if users/{uid} does not exist on server
+                let regData: any = null;
+                try {
+                  const regDocRef = doc(db, 'registrations', firebaseUser.uid);
+                  const regSnap = await getDoc(regDocRef);
+                  regData = regSnap.exists() ? regSnap.data() : null;
+                } catch (regErr) {
+                  console.warn(
+                    '[AuthContext] Registration lookup failed or insufficient permissions:',
+                    regErr
+                  );
+                }
+
+                if (
+                  regData &&
+                  (regData.status === 'pending' ||
+                    regData.status === 'rejected' ||
+                    regData.status === 'under_review' ||
+                    regData.status === 'needs_additional_docs')
+                ) {
+                  const regStatus = regData.status;
+                  const tempUser: User = {
+                    uid: firebaseUser.uid,
+                    email: regData.email || firebaseUser.email || '',
+                    firstName: regData.firstName || 'Applicant',
+                    lastName: regData.lastName || '',
+                    fullName:
+                      regData.fullName ||
+                      `${regData.firstName || ''} ${regData.lastName || ''}`.trim() ||
+                      'Applicant',
+                    phoneNumber: regData.phoneNumber || '',
+                    address: regData.address || '',
+                    purok: regData.purok || 'Purok 1',
+                    barangay: regData.barangay || 'Barangay Central',
+                    municipality: regData.municipality || 'Baras',
+                    province: regData.province || 'Rizal',
+                    role: regData.appliedRole || 'resident',
+                    status: regStatus === 'rejected' ? 'suspended' : 'pending',
+                    emailVerified: firebaseUser.emailVerified,
+                    isActive: false,
+                    createdAt: regData.submittedAt || new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    isDeleted: false,
+                  };
+
+                  safeSetUserLocalStorage(tempUser);
+                  persistOfflineSession(tempUser, 'online_authenticated').catch(() => {});
+                  setUser(tempUser);
+                } else {
+                  safeSetUserLocalStorage(null);
+                  offlineStorage.clearSession().catch(() => {});
+                  setUser(null);
+                }
+              }
+              setIsAuthInitialized(true);
+            },
+            async (err) => {
+              console.warn(
+                'Error listening to user profile doc (checking offline session):',
+                err
+              );
               try {
-                const regDocRef = doc(db, 'registrations', firebaseUser.uid);
-                const regSnap = await getDoc(regDocRef);
-                regData = regSnap.exists() ? regSnap.data() : null;
-              } catch (regErr) {
-                console.warn('[AuthContext] Registration lookup failed or insufficient permissions:', regErr);
-              }
-
-              if (regData && (regData.status === 'pending' || regData.status === 'rejected' || regData.status === 'under_review' || regData.status === 'needs_additional_docs')) {
-                const regStatus = regData.status;
-                const tempUser: User = {
-                  uid: firebaseUser.uid,
-                  email: regData.email || firebaseUser.email || '',
-                  firstName: regData.firstName || 'Applicant',
-                  lastName: regData.lastName || '',
-                  fullName: regData.fullName || `${regData.firstName || ''} ${regData.lastName || ''}`.trim() || 'Applicant',
-                  phoneNumber: regData.phoneNumber || '',
-                  address: regData.address || '',
-                  purok: regData.purok || 'Purok 1',
-                  barangay: regData.barangay || 'Barangay Central',
-                  municipality: regData.municipality || 'Baras',
-                  province: regData.province || 'Rizal',
-                  role: regData.appliedRole || 'resident',
-                  status: regStatus === 'rejected' ? 'suspended' : 'pending',
-                  emailVerified: firebaseUser.emailVerified,
-                  isActive: false,
-                  createdAt: regData.submittedAt || new Date().toISOString(),
-                  updatedAt: new Date().toISOString(),
-                  isDeleted: false,
-                };
-
-                safeSetUserLocalStorage(tempUser);
-                setUser(tempUser);
-              } else {
-                safeSetUserLocalStorage(null);
-                setUser(null);
-              }
+                const session = await offlineStorage.getSession();
+                if (
+                  session &&
+                  session.uid === firebaseUser.uid &&
+                  isOfflineSessionValid(session)
+                ) {
+                  safeSetUserLocalStorage(session.user);
+                  setUser(session.user);
+                }
+              } catch (_) {}
+              setIsAuthInitialized(true);
             }
-            setIsAuthInitialized(true);
-          }, (err) => {
-            console.warn('Error listening to user profile doc:', err);
-            setIsAuthInitialized(true);
-          });
+          );
         } catch (err) {
-          console.warn('Could not fetch Firestore user or registration profile:', err);
+          console.warn(
+            'Could not fetch Firestore user or registration profile:',
+            err
+          );
           setIsAuthInitialized(true);
         }
       } else {
-        safeSetUserLocalStorage(null);
-        setUser(null);
+        // firebaseUser is null
+        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+        if (isOffline) {
+          try {
+            const session = await offlineStorage.getSession();
+            if (session && isOfflineSessionValid(session)) {
+              console.info(
+                '[AuthContext] Preserving active offline session for UID:',
+                session.uid
+              );
+              safeSetUserLocalStorage(session.user);
+              setUser((prev) => prev || session.user);
+            } else {
+              safeSetUserLocalStorage(null);
+              setUser(null);
+            }
+          } catch (_) {
+            safeSetUserLocalStorage(null);
+            setUser(null);
+          }
+        } else {
+          // Explicitly unauthenticated while online
+          safeSetUserLocalStorage(null);
+          offlineStorage.clearSession().catch(() => {});
+          setUser(null);
+        }
         setIsAuthInitialized(true);
       }
     });
@@ -280,6 +366,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (unsubUserDoc) unsubUserDoc();
       unsubscribeAuth();
     };
+  }, []);
+
+  // Online reconnection listener
+  useEffect(() => {
+    const handleOnline = async () => {
+      console.info('[AuthContext] Network came online. Verifying session...');
+      if (auth.currentUser) {
+        refreshUser().catch(() => {});
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
   }, []);
 
   useEffect(() => {
@@ -331,6 +430,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
       safeSetUserLocalStorage(result.user);
+      await persistOfflineSession(result.user, 'online_authenticated');
       setUser(result.user);
       fcmClientService.initializeForUser(result.user).catch((e) => {
         console.info('[AuthContext] FCM registration notice:', e?.message || e);
@@ -351,6 +451,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (snap.exists()) {
           const userData = { uid: snap.id, ...snap.data() } as User;
           safeSetUserLocalStorage(userData);
+          await persistOfflineSession(userData, 'online_authenticated');
           setUser(userData);
         }
       } catch (err) {
@@ -381,6 +482,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         updatedAt: new Date().toISOString(),
       };
       safeSetUserLocalStorage(updatedUser);
+      offlineStorage
+        .getSession()
+        .then((curr) => {
+          if (curr && curr.uid === updatedUser.uid) {
+            offlineStorage
+              .saveSession({
+                ...curr,
+                user: updatedUser,
+                lastActiveAt: new Date().toISOString(),
+              })
+              .catch(() => {});
+          }
+        })
+        .catch(() => {});
       setUser(updatedUser);
     } catch (err) {
       console.error('Failed to update duty mode:', err);
@@ -452,6 +567,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.info('Signed out locally.');
     } finally {
       safeSetUserLocalStorage(null);
+      await offlineStorage.clearSession().catch(() => {});
       certificateService.clearLocalCache();
       setUser(null);
       setLoading(false);

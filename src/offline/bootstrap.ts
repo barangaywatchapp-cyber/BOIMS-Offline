@@ -9,13 +9,15 @@
 
 import { offlineStorage } from './storage';
 import { offlineRecovery } from './recovery';
-import { OfflineQueueItem } from './types';
+import { syncQueueMigration } from './syncMigration';
+import { OfflineQueueItem, OfflineStorageMetadata } from './types';
 
 export interface OfflineBootstrapResult {
   available: boolean;
   recovered: OfflineQueueItem[];
   recoveredCount: number;
   failedCount: number;
+  metadata?: OfflineStorageMetadata | null;
 }
 
 class OfflineBootstrap {
@@ -30,10 +32,28 @@ class OfflineBootstrap {
         recovered: [],
         recoveredCount: 0,
         failedCount: 1,
+        metadata: null,
       };
     }
 
+    let metadata: OfflineStorageMetadata | null = null;
+    try {
+      metadata = await offlineStorage.putMetadata({
+        lastUpdatedAt: new Date().toISOString(),
+      });
+    } catch (metaErr) {
+      console.warn('[OfflineBootstrap] Could not update storage metadata:', metaErr);
+    }
+
+    // 1. Recover interrupted 'syncing' queue items -> 'pending'
     const recoveryResult = await offlineRecovery.recover();
+
+    // 2. Migrate legacy localStorage sync queue to IndexedDB if present
+    try {
+      await syncQueueMigration.migrateLegacyQueue();
+    } catch (migErr) {
+      console.warn('[OfflineBootstrap] Legacy queue migration warning:', migErr);
+    }
 
     console.info(
       `[OfflineBootstrap] Initialization complete. Recovered ${recoveryResult.recoveredCount} queue item(s).`
@@ -44,6 +64,7 @@ class OfflineBootstrap {
       recovered: recoveryResult.recovered,
       recoveredCount: recoveryResult.recoveredCount,
       failedCount: recoveryResult.failedCount,
+      metadata,
     };
   }
 }

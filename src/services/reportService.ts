@@ -23,6 +23,7 @@ import {
 } from 'firebase/firestore';
 import { db, auth, handleFirestoreError, OperationType } from '../firebase/config';
 import { Report, ReportStatus, ReportPriority, IncidentCategory, ReportTimelineEvent, UserRole, DutyStatus, DutyMode, User } from '../types';
+import { offlineStorage } from '../offline/storage';
 import { syncService } from './SyncService';
 import { isResidentMode } from '../utils/permissions';
 import { storageService } from './storageService';
@@ -137,6 +138,18 @@ function getInitialLocalReports(): Report[] {
 
 function saveLocalReports(reports: Report[]): void {
   inMemoryReports = reports;
+  offlineStorage
+    .putCachedEntities(
+      'reports',
+      reports.map((r) => ({
+        recordId: r.reportId || r.reportNumber,
+        data: r,
+        updatedAt: r.updatedAt || r.createdAt,
+      }))
+    )
+    .catch((err) => {
+      console.warn('[ReportService] Failed to update offline entity cache:', err);
+    });
 }
 
 /**

@@ -9,7 +9,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { WifiOff, RefreshCw, CheckCircle2, AlertCircle, AlertTriangle } from 'lucide-react';
 
 export const OfflineBanner: React.FC = () => {
-  const { isOnline, pendingCount, failedCount, isSyncing, triggerSync } = useOffline();
+  const { isOnline, pendingCount, failedCount, dlqCount, isSyncing, triggerSync } = useOffline();
   const { user, hasActiveDispatcher } = useAuth();
   const [hasDispatcherOnDuty, setHasDispatcherOnDuty] = useState<boolean>(true);
 
@@ -44,8 +44,8 @@ export const OfflineBanner: React.FC = () => {
   const showNoDispatcherAlert = isFieldResponder && !hasDispatcherOnDuty;
 
   // Priority 1: Critical Operational Alerts
-  // Priority 2: Warning Alerts / Offline / Sync Attention
-  if (!showNoDispatcherAlert && isOnline && pendingCount === 0 && failedCount === 0) {
+  // Priority 2: Warning Alerts / Offline / Sync Attention / DLQ
+  if (!showNoDispatcherAlert && isOnline && pendingCount === 0 && failedCount === 0 && dlqCount === 0) {
     return null;
   }
 
@@ -56,7 +56,7 @@ export const OfflineBanner: React.FC = () => {
           ? 'bg-red-900 border-b border-red-800'
           : !isOnline
           ? 'bg-slate-800 border-b border-slate-700'
-          : failedCount > 0
+          : dlqCount > 0 || failedCount > 0
           ? 'bg-amber-900 border-b border-amber-800'
           : 'bg-blue-800 border-b border-blue-700'
       }`}
@@ -76,6 +76,13 @@ export const OfflineBanner: React.FC = () => {
               <strong>Offline Mode:</strong> Changes are saved locally and queued for automatic synchronization when connected.
             </span>
           </>
+        ) : dlqCount > 0 ? (
+          <>
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              <strong>Dead Letter Queue Alert:</strong> {dlqCount} change(s) reached max retries or permanent rejection and are quarantined.
+            </span>
+          </>
         ) : failedCount > 0 ? (
           <>
             <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
@@ -93,12 +100,19 @@ export const OfflineBanner: React.FC = () => {
         )}
       </div>
 
-      {pendingCount > 0 && (
+      {(pendingCount > 0 || dlqCount > 0) && (
         <div className="flex items-center gap-2">
-          <span className="bg-white/20 px-2 py-0.5 rounded-full text-[11px] font-bold">
-            {pendingCount} Pending
-          </span>
-          {isOnline && (
+          {pendingCount > 0 && (
+            <span className="bg-white/20 px-2 py-0.5 rounded-full text-[11px] font-bold">
+              {pendingCount} Pending
+            </span>
+          )}
+          {dlqCount > 0 && (
+            <span className="bg-red-500/80 px-2 py-0.5 rounded-full text-[11px] font-bold">
+              {dlqCount} Quarantined
+            </span>
+          )}
+          {isOnline && pendingCount > 0 && (
             <button
               onClick={triggerSync}
               disabled={isSyncing}

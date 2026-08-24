@@ -24,6 +24,7 @@ import { db, auth } from '../firebase/config';
 import { CertificateRequest, CertificateType, CertificateStatus, PaymentStatus, User, UserRole, PublicVerificationRecord } from '../types';
 import { CERTIFICATE_TYPES } from '../constants';
 import { filterCertificatesByAccess } from '../utils/jurisdictionUtils';
+import { offlineStorage } from '../offline/storage';
 import { syncService } from './SyncService';
 import { storageService } from './storageService';
 import { adminService } from './adminService';
@@ -311,6 +312,20 @@ export class CertificateService {
         merged.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         localCertificatesStore = merged;
         result = merged;
+
+        // Refresh Phase 2 IndexedDB offline cache asynchronously
+        offlineStorage
+          .putCachedEntities(
+            'certificateRequests',
+            merged.map((c) => ({
+              recordId: c.certificateId,
+              data: c,
+              updatedAt: c.updatedAt || c.createdAt,
+            }))
+          )
+          .catch((err) => {
+            console.warn('[CertificateService] Failed to update offline entity cache:', err);
+          });
       } else {
         result = localCertificatesStore.filter((cert) => !cert.isDeleted).map((c) => {
           if ((c.status as string) === 'released' || (c.status as string) === 'releasedToResident') {
@@ -320,13 +335,38 @@ export class CertificateService {
         });
       }
     } catch (error) {
-      console.warn('[CertificateService] Firestore offline or error. Using local store cache:', error);
-      result = localCertificatesStore.filter((cert) => !cert.isDeleted).map((c) => {
-        if ((c.status as string) === 'released' || (c.status as string) === 'releasedToResident') {
-          return { ...c, status: 'claimed' as CertificateStatus };
+      console.warn('[CertificateService] Firestore offline or error. Checking IndexedDB cache:', error);
+      try {
+        const cached = await offlineStorage.getCachedEntities<CertificateRequest>('certificateRequests');
+        if (cached.length > 0) {
+          const merged = [...cached.map((c) => c.data)];
+          localCertificatesStore.forEach((local) => {
+            if (!merged.some((m) => m.certificateId === local.certificateId) && !local.isDeleted) {
+              merged.push(local);
+            }
+          });
+          result = merged.filter((cert) => !cert.isDeleted).map((c) => {
+            if ((c.status as string) === 'released' || (c.status as string) === 'releasedToResident') {
+              return { ...c, status: 'claimed' as CertificateStatus };
+            }
+            return c;
+          });
+        } else {
+          result = localCertificatesStore.filter((cert) => !cert.isDeleted).map((c) => {
+            if ((c.status as string) === 'released' || (c.status as string) === 'releasedToResident') {
+              return { ...c, status: 'claimed' as CertificateStatus };
+            }
+            return c;
+          });
         }
-        return c;
-      });
+      } catch {
+        result = localCertificatesStore.filter((cert) => !cert.isDeleted).map((c) => {
+          if ((c.status as string) === 'released' || (c.status as string) === 'releasedToResident') {
+            return { ...c, status: 'claimed' as CertificateStatus };
+          }
+          return c;
+        });
+      }
     }
 
     if (currentUser) {

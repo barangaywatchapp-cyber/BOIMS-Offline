@@ -8,11 +8,8 @@ import { AuthProvider } from './contexts/AuthContext';
 import { OfflineProvider } from './contexts/OfflineContext';
 import { ToastProvider } from './contexts/ToastContext';
 import { AppRoutes } from './routes/AppRoutes';
-import { useOfflineBootstrap } from './offline/useOfflineBootstrap';
 
 export default function App() {
-  useOfflineBootstrap();
-
   return (
     <BrowserRouter>
       <OfflineProvider>

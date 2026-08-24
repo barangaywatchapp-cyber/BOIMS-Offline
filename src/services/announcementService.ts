@@ -29,6 +29,7 @@ import {
   UserRole,
   User,
 } from '../types';
+import { offlineStorage } from '../offline/storage';
 import { syncService } from './SyncService';
 import { notificationService } from './notificationService';
 import { adminService } from './adminService';
@@ -100,12 +101,38 @@ class AnnouncementService {
         this.localAnnouncements.forEach((a) => map.set(a.announcementId, a));
         list.forEach((a) => map.set(a.announcementId, a));
         this.localAnnouncements = Array.from(map.values());
+
+        // Refresh Phase 2 IndexedDB offline cache asynchronously
+        offlineStorage
+          .putCachedEntities(
+            COLLECTION_NAME,
+            list.map((item) => ({
+              recordId: item.announcementId,
+              data: item,
+              updatedAt: item.updatedAt || item.createdAt,
+            }))
+          )
+          .catch((err) => {
+            console.warn('[AnnouncementService] Failed to update offline entity cache:', err);
+          });
       } else {
         list = [...this.localAnnouncements];
       }
     } catch (error) {
-      console.warn('[AnnouncementService] Using cached local announcements:', error);
-      list = [...this.localAnnouncements];
+      console.warn('[AnnouncementService] Remote read failed, checking IndexedDB cache:', error);
+      try {
+        const cached = await offlineStorage.getCachedEntities<Announcement>(COLLECTION_NAME);
+        if (cached.length > 0) {
+          const map = new Map<string, Announcement>();
+          this.localAnnouncements.forEach((a) => map.set(a.announcementId, a));
+          cached.forEach((c) => map.set(c.data.announcementId, c.data));
+          list = Array.from(map.values());
+        } else {
+          list = [...this.localAnnouncements];
+        }
+      } catch {
+        list = [...this.localAnnouncements];
+      }
     }
 
     // Filter non-deleted
@@ -277,10 +304,27 @@ class AnnouncementService {
       const docRef = doc(db, COLLECTION_NAME, announcementId);
       const snapshot = await getDoc(docRef);
       if (snapshot.exists()) {
-        return snapshot.data() as Announcement;
+        const item = snapshot.data() as Announcement;
+        offlineStorage
+          .putCachedEntity(COLLECTION_NAME, announcementId, item, {
+            updatedAt: item.updatedAt || item.createdAt,
+          })
+          .catch(() => {});
+        return item;
       }
     } catch (error) {
-      console.warn('[AnnouncementService] Error fetching single announcement:', error);
+      console.warn('[AnnouncementService] Error fetching single announcement, falling back to cache:', error);
+      try {
+        const cached = await offlineStorage.getCachedEntity<Announcement>(
+          COLLECTION_NAME,
+          announcementId
+        );
+        if (cached?.data) {
+          return cached.data;
+        }
+      } catch {
+        // ignore and check memory
+      }
     }
     return this.localAnnouncements.find((a) => a.announcementId === announcementId) || null;
   }

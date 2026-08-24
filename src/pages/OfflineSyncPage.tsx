@@ -34,7 +34,12 @@ import {
   Activity,
   Sliders,
   ShieldCheck,
+  UserCheck,
+  Play,
 } from 'lucide-react';
+import { offlineStorage } from '../offline/storage';
+import { OfflineSessionRecord } from '../offline/types';
+import { runPhase3TestSuite, Phase3TestSuiteSummary } from '../offline/phase3Tests';
 
 export const OfflineSyncPage: React.FC = () => {
   const { isOnline, pendingCount, failedCount, queue, isSyncing, triggerSync, clearQueue, removeItem } =
@@ -45,6 +50,37 @@ export const OfflineSyncPage: React.FC = () => {
   const [showPayloadModal, setShowPayloadModal] = useState<boolean>(false);
   const [conflictStrategy, setConflictStrategy] = useState<'clientWins' | 'serverWins' | 'manual'>('clientWins');
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [offlineSession, setOfflineSession] = useState<OfflineSessionRecord | null>(null);
+  const [loadingSession, setLoadingSession] = useState<boolean>(false);
+  const [phase3TestReport, setPhase3TestReport] = useState<Phase3TestSuiteSummary | null>(null);
+  const [runningPhase3Tests, setRunningPhase3Tests] = useState<boolean>(false);
+
+  React.useEffect(() => {
+    loadOfflineSession();
+  }, []);
+
+  const loadOfflineSession = async () => {
+    setLoadingSession(true);
+    try {
+      const session = await offlineStorage.getSession();
+      setOfflineSession(session);
+    } catch (err) {
+      console.warn('Error reading offline session:', err);
+    } finally {
+      setLoadingSession(false);
+    }
+  };
+
+  const handleRunPhase3Tests = async () => {
+    setRunningPhase3Tests(true);
+    try {
+      const summary = await runPhase3TestSuite();
+      setPhase3TestReport(summary);
+      await loadOfflineSession();
+    } finally {
+      setRunningPhase3Tests(false);
+    }
+  };
 
   const effectiveOnlineStatus = isOnline && !simulatedOffline;
 
@@ -330,6 +366,124 @@ export const OfflineSyncPage: React.FC = () => {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Phase 3: Offline Authentication & Session Persistence Status */}
+      <Card className="border border-blue-200 bg-linear-to-r from-blue-50/50 via-white to-indigo-50/30">
+        <CardHeader className="border-b border-blue-100 pb-3 flex flex-row items-center justify-between">
+          <CardTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+            <UserCheck className="w-5 h-5 text-blue-600" /> Phase 3 — Offline Authentication & Session Persistence
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={loadOfflineSession}
+              disabled={loadingSession}
+              className="text-xs"
+            >
+              <RefreshCw className={`w-3 h-3 mr-1 ${loadingSession ? 'animate-spin' : ''}`} /> Refresh Session
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleRunPhase3Tests}
+              disabled={runningPhase3Tests}
+              className="text-xs flex items-center gap-1 bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              <Play className={`w-3 h-3 ${runningPhase3Tests ? 'animate-spin' : ''}`} />
+              {runningPhase3Tests ? 'Running 21 Tests...' : 'Run Phase 3 Test Suite (21 Tests)'}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="p-6 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs">
+            <div className="p-3.5 bg-white rounded-xl border border-slate-200 shadow-xs">
+              <span className="text-slate-400 font-bold uppercase tracking-wider text-[10px]">Session Status</span>
+              <p className="font-bold text-slate-900 text-sm mt-1 flex items-center gap-1.5">
+                {offlineSession ? (
+                  <span className="text-emerald-600 flex items-center gap-1">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Active Offline Session
+                  </span>
+                ) : (
+                  <span className="text-slate-500 flex items-center gap-1">
+                    <AlertTriangle className="w-4 h-4 text-amber-500" /> No Cached Session
+                  </span>
+                )}
+              </p>
+            </div>
+
+            <div className="p-3.5 bg-white rounded-xl border border-slate-200 shadow-xs">
+              <span className="text-slate-400 font-bold uppercase tracking-wider text-[10px]">Authenticated User</span>
+              <p className="font-bold text-slate-900 text-sm mt-1 truncate">
+                {offlineSession ? offlineSession.user.fullName || offlineSession.user.email : 'None'}
+              </p>
+              {offlineSession && (
+                <p className="text-[11px] text-slate-500 mt-0.5">Role: <span className="font-mono font-bold text-blue-600">{offlineSession.user.role}</span></p>
+              )}
+            </div>
+
+            <div className="p-3.5 bg-white rounded-xl border border-slate-200 shadow-xs">
+              <span className="text-slate-400 font-bold uppercase tracking-wider text-[10px]">Jurisdiction Scope</span>
+              <p className="font-bold text-slate-900 text-sm mt-1">
+                {offlineSession ? offlineSession.user.jurisdiction || offlineSession.user.purok || 'Global' : 'None'}
+              </p>
+              {offlineSession && (
+                <p className="text-[11px] text-slate-500 mt-0.5">Mode: <span className="font-mono text-slate-700">{offlineSession.user.dutyMode || 'Standard'}</span></p>
+              )}
+            </div>
+
+            <div className="p-3.5 bg-white rounded-xl border border-slate-200 shadow-xs">
+              <span className="text-slate-400 font-bold uppercase tracking-wider text-[10px]">Session Expiration</span>
+              <p className="font-bold text-slate-900 text-sm mt-1">
+                {offlineSession?.expiresAt ? new Date(offlineSession.expiresAt).toLocaleDateString() : 'N/A'}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">TTL: 7 Days (IndexedDB)</p>
+            </div>
+          </div>
+
+          {/* Test Suite Results Display */}
+          {phase3TestReport && (
+            <div className="mt-4 p-4 bg-white rounded-xl border border-slate-200 space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-sm text-slate-900">Phase 3 Verification Report</span>
+                  <Badge variant={phase3TestReport.failed === 0 ? 'success' : 'danger'}>
+                    {phase3TestReport.passed} / {phase3TestReport.total} PASSED
+                  </Badge>
+                </div>
+                <span className="text-[11px] text-slate-400">
+                  Executed: {new Date(phase3TestReport.executedAt).toLocaleTimeString()}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
+                {phase3TestReport.results.map((t) => (
+                  <div
+                    key={t.id}
+                    className={`p-2.5 rounded-lg border text-xs flex items-start justify-between gap-2 ${
+                      t.passed ? 'bg-emerald-50/50 border-emerald-200' : 'bg-red-50/50 border-red-200'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        {t.passed ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        ) : (
+                          <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                        )}
+                        <span className="font-bold text-slate-800">{t.name}</span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">{t.description}</p>
+                      {t.error && <p className="text-[11px] text-red-600 font-mono mt-1">Error: {t.error}</p>}
+                    </div>
+                    <span className="text-[10px] font-mono text-slate-400 shrink-0">{t.durationMs}ms</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </CardContent>
