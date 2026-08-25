@@ -1414,6 +1414,99 @@ class OfflineStorage {
     await this.deleteReplayLease();
     await this.clearSession();
   }
+
+  // =========================================================================
+  // Phase 9 — Offline Notifications Helpers
+  // =========================================================================
+
+  /**
+   * Caches multiple notification records in IndexedDB 'offlineEntities'.
+   */
+  async putCachedNotifications<T = unknown>(
+    notifications: Array<{ notificationId: string; [key: string]: any }>
+  ): Promise<Array<CachedEntity<T>>> {
+    return this.putCachedEntities<T>(
+      'notifications',
+      notifications.map((n) => ({
+        recordId: n.notificationId,
+        data: n as unknown as T,
+        updatedAt: n.updatedAt || n.createdAt,
+      }))
+    );
+  }
+
+  /**
+   * Retrieves all cached notifications from 'offlineEntities'.
+   */
+  async getCachedNotifications<T = unknown>(): Promise<Array<CachedEntity<T>>> {
+    return this.getCachedEntities<T>('notifications');
+  }
+
+  /**
+   * Retrieves a single cached notification from 'offlineEntities'.
+   */
+  async getCachedNotification<T = unknown>(
+    notificationId: string
+  ): Promise<CachedEntity<T> | null> {
+    return this.getCachedEntity<T>('notifications', notificationId);
+  }
+
+  /**
+   * Deletes a cached notification from 'offlineEntities'.
+   */
+  async deleteCachedNotification(notificationId: string): Promise<void> {
+    return this.deleteCachedEntity('notifications', notificationId);
+  }
+
+  /**
+   * Persists user notification overlay state (read/unread, deleted flags) into IndexedDB 'offlineMetadata'.
+   */
+  async saveUserNotificationOverlay(
+    uid: string,
+    overlay: Record<string, unknown>
+  ): Promise<void> {
+    if (!uid) return;
+    const db = await this.openDatabase();
+    const key = `user_notification_overlay_${uid}`;
+
+    return new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(METADATA_STORE, 'readwrite');
+      const store = transaction.objectStore(METADATA_STORE);
+
+      store.put({ key, overlay, updatedAt: new Date().toISOString() });
+
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => {
+        reject(transaction.error ?? new Error(`Failed to save notification overlay for ${uid}.`));
+      };
+    });
+  }
+
+  /**
+   * Retrieves user notification overlay state from IndexedDB 'offlineMetadata'.
+   */
+  async getUserNotificationOverlay(
+    uid: string
+  ): Promise<Record<string, unknown>> {
+    if (!uid) return {};
+    const db = await this.openDatabase();
+    const key = `user_notification_overlay_${uid}`;
+
+    return new Promise<Record<string, unknown>>((resolve) => {
+      const transaction = db.transaction(METADATA_STORE, 'readonly');
+      const store = transaction.objectStore(METADATA_STORE);
+      const request = store.get(key);
+
+      request.onsuccess = () => {
+        const result = request.result;
+        resolve((result && result.overlay) ? result.overlay : {});
+      };
+
+      request.onerror = () => {
+        resolve({});
+      };
+    });
+  }
 }
 
 export const offlineStorage = new OfflineStorage();

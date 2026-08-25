@@ -830,7 +830,8 @@ export type CoordinationSignalType =
   | 'lease_released'
   | 'lease_renewed'
   | 'lease_lost'
-  | 'queue_changed';
+  | 'queue_changed'
+  | 'notification_state_changed';
 
 /**
  * Non-durable BroadcastChannel message format for real-time tab notification.
@@ -843,4 +844,255 @@ export interface CoordinationSignalMessage {
   expiresAt?: string;
   details?: Record<string, unknown>;
 }
+
+// =========================================================================
+// Phase 9 — Offline Notifications, Cross-Tab Notification State & Delivery Reconciliation
+// =========================================================================
+
+export const OFFLINE_NOTIFICATIONS_COLLECTION = 'notifications';
+export const NOTIFICATION_SCHEMA_VERSION = 1;
+
+export type NotificationSyncState =
+  | 'synced'
+  | 'pending_create'
+  | 'pending_update'
+  | 'pending_delete';
+
+/**
+ * Offline notification record stored in 'offlineEntities' IndexedDB store.
+ * Strictly free of credentials, tokens, passwords, and private keys.
+ */
+export interface OfflineNotificationRecord {
+  /** Stable notification identifier */
+  notificationId: string;
+
+  /** Target user identifier or broadcast audience */
+  userId: string;
+
+  /** Notification title */
+  title: string;
+
+  /** Notification body text */
+  message: string;
+
+  /** Notification category/type */
+  type: string;
+
+  /** Priority level */
+  priority: string;
+
+  /** Read status */
+  isRead: boolean;
+
+  /** ISO timestamp when marked as read */
+  readAt?: string | null;
+
+  /** Deep link route */
+  link?: string;
+
+  /** Associated report ID if applicable */
+  reportId?: string;
+
+  /** Associated certificate request ID if applicable */
+  certificateId?: string;
+
+  /** Associated announcement ID if applicable */
+  announcementId?: string;
+
+  /** Associated inventory ID if applicable */
+  inventoryId?: string;
+
+  /** Icon descriptor */
+  icon?: string;
+
+  /** UID of creator or system */
+  createdBy?: string;
+
+  /** Target jurisdiction or purok for role-based routing */
+  targetJurisdiction?: string;
+  purok?: string;
+
+  /** Optional metadata payload (non-sensitive) */
+  metadata?: Record<string, unknown>;
+
+  /** ISO creation timestamp */
+  createdAt: string;
+
+  /** ISO update timestamp */
+  updatedAt?: string;
+
+  /** Soft-delete flag */
+  isDeleted: boolean;
+
+  /** ISO deletion timestamp */
+  deletedAt?: string | null;
+
+  /** Synchronization state */
+  syncState?: NotificationSyncState;
+
+  /** Schema version */
+  schemaVersion: number;
+}
+
+export interface UserNotificationOverlayItem {
+  isRead?: boolean;
+  readAt?: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+}
+
+export type UserNotificationOverlay = Record<string, UserNotificationOverlayItem>;
+
+export interface NotificationReconciliationResult {
+  reconciled: OfflineNotificationRecord[];
+  addedCount: number;
+  updatedCount: number;
+  deletedCount: number;
+}
+
+/**
+ * Reconciles local cached notifications with authoritative remote notifications.
+ * Preserves user read/deleted overlay, avoids duplicates by notificationId,
+ * and maintains newest-first chronological ordering.
+ */
+export function reconcileOfflineNotifications(
+  localCached: OfflineNotificationRecord[],
+  remoteNotifications: OfflineNotificationRecord[],
+  userOverlay: UserNotificationOverlay = {}
+): NotificationReconciliationResult {
+  const notificationMap = new Map<string, OfflineNotificationRecord>();
+  let addedCount = 0;
+  let updatedCount = 0;
+  let deletedCount = 0;
+
+  // 1. Populate map with local cached notifications
+  for (const local of localCached) {
+    if (local && local.notificationId) {
+      notificationMap.set(local.notificationId, { ...local });
+    }
+  }
+
+  // 2. Reconcile with remote notifications (remote is authoritative for server data)
+  for (const remote of remoteNotifications) {
+    if (!remote || !remote.notificationId) continue;
+
+    const existing = notificationMap.get(remote.notificationId);
+    if (!existing) {
+      // New remote notification
+      notificationMap.set(remote.notificationId, { ...remote });
+      addedCount++;
+    } else {
+      // Update existing if remote is newer or has updated state
+      const existingTime = new Date(existing.updatedAt || existing.createdAt).getTime();
+      const remoteTime = new Date(remote.updatedAt || remote.createdAt).getTime();
+
+      // Check if remote is deleted
+      if (remote.isDeleted && !existing.isDeleted) {
+        existing.isDeleted = true;
+        existing.deletedAt = remote.deletedAt || new Date().toISOString();
+        deletedCount++;
+      } else if (remoteTime >= existingTime) {
+        // Apply remote fields while preserving local overlay if newer
+        notificationMap.set(remote.notificationId, {
+          ...existing,
+          ...remote,
+        });
+        updatedCount++;
+      }
+    }
+  }
+
+  // 3. Apply user-specific read/delete overlay (for broadcast & user state)
+  const resultList: OfflineNotificationRecord[] = [];
+  for (const notif of notificationMap.values()) {
+    const overlay = userOverlay[notif.notificationId];
+    const merged: OfflineNotificationRecord = {
+      ...notif,
+      isRead: overlay?.isRead !== undefined ? overlay.isRead : notif.isRead,
+      readAt: overlay?.readAt !== undefined ? overlay.readAt : notif.readAt,
+      isDeleted: overlay?.isDeleted !== undefined ? overlay.isDeleted : notif.isDeleted,
+      deletedAt: overlay?.deletedAt !== undefined ? overlay.deletedAt : notif.deletedAt,
+    };
+
+    if (!merged.isDeleted) {
+      resultList.push(merged);
+    }
+  }
+
+  // 4. Sort chronological: newest first
+  resultList.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  return {
+    reconciled: resultList,
+    addedCount,
+    updatedCount,
+    deletedCount,
+  };
+}
+
+/**
+ * Deduplicates notification array by stable notificationId.
+ */
+export function deduplicateNotifications<T extends { notificationId?: string; id?: string }>(
+  items: T[]
+): T[] {
+  const seen = new Set<string>();
+  const deduplicated: T[] = [];
+
+  for (const item of items) {
+    const id = item.notificationId || item.id;
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      deduplicated.push(item);
+    }
+  }
+
+  return deduplicated;
+}
+
+/**
+ * Sorts notifications in descending chronological order (newest first).
+ */
+export function sortNotificationsChronological<T extends { createdAt: string }>(
+  items: T[]
+): T[] {
+  return [...items].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
+
+/**
+ * Verifies that a notification record contains no sensitive credentials or tokens.
+ */
+export function auditNotificationForSecrets(record: unknown): boolean {
+  if (!record || typeof record !== 'object') return true;
+  const sensitiveKeys = [
+    'password',
+    'token',
+    'idToken',
+    'refreshToken',
+    'fcmToken',
+    'registrationToken',
+    'apiKey',
+    'secret',
+    'privateKey',
+    'credential',
+  ];
+
+  const check = (obj: any): boolean => {
+    for (const key of Object.keys(obj)) {
+      const lowerKey = key.toLowerCase();
+      if (sensitiveKeys.some((s) => lowerKey === s.toLowerCase() || lowerKey.includes('secret') || lowerKey.includes('token') && !lowerKey.includes('report') && !lowerKey.includes('announcement'))) {
+        return false;
+      }
+      if (obj[key] && typeof obj[key] === 'object') {
+        if (!check(obj[key])) return false;
+      }
+    }
+    return true;
+  };
+
+  return check(record);
+}
+
 

@@ -22,6 +22,9 @@ import { auth, db } from '../firebase/config';
 import { Notification, NotificationType, ReportPriority, UserRole, User } from '../types';
 import { syncService } from './SyncService';
 import { filterNotificationsByAccess } from '../utils/jurisdictionUtils';
+import { offlineStorage } from '../offline/storage';
+import { coordinationService } from '../offline/coordinationService';
+import { deduplicateNotifications } from '../offline/types';
 
 const COLLECTION_NAME = 'notifications';
 
@@ -55,8 +58,12 @@ function saveUserOverlay(uid: string, overlay: UserNotifOverlay): void {
   try {
     localStorage.setItem(getUserOverlayKey(uid), JSON.stringify(overlay));
   } catch (e) {
-    console.warn('[NotificationService] Failed to save notification overlay:', e);
+    console.warn('[NotificationService] Failed to save notification overlay to localStorage:', e);
   }
+  // Dual-write to IndexedDB for durability
+  offlineStorage.saveUserNotificationOverlay(uid, overlay).catch((e) => {
+    console.warn('[NotificationService] Failed to save notification overlay to IndexedDB:', e);
+  });
 }
 
 function updateUserOverlay(uid: string, notificationId: string, updates: UserNotifOverlayItem): void {
@@ -154,8 +161,21 @@ class NotificationService {
   async getUserNotifications(userId: string, userRole?: UserRole, currentUser?: User | null): Promise<Notification[]> {
     const currentUid = auth.currentUser?.uid || userId || currentUser?.uid;
 
+    // Load from durable IndexedDB entity cache as base offline fallback
+    let cachedFromStorage: Notification[] = [];
+    try {
+      const storageEntities = await offlineStorage.getCachedNotifications<Notification>();
+      cachedFromStorage = storageEntities.map((e) => e.data).filter(Boolean);
+    } catch {
+      // storage read fallback
+    }
+
     if (!auth.currentUser || (!userId && !currentUser)) {
-      const filtered = this.applyUserOverlay(this.localNotifications, currentUid).filter((n) => !n.isDeleted);
+      const merged = deduplicateNotifications([...this.localNotifications, ...cachedFromStorage]);
+      const filtered = this.applyUserOverlay(merged, currentUid).filter((n) => !n.isDeleted);
+      if (currentUser) {
+        return filterNotificationsByAccess(filtered, currentUser);
+      }
       return filtered;
     }
     let list: Notification[] = [];
@@ -209,12 +229,18 @@ class NotificationService {
 
       if (snapshotDocs.length > 0) {
         list = snapshotDocs;
+        // Durable cache write to IndexedDB
+        offlineStorage.putCachedNotifications(snapshotDocs).catch((err) => {
+          console.warn('[NotificationService] Failed to cache notifications to IndexedDB:', err);
+        });
       } else {
-        list = [...this.localNotifications];
+        const merged = deduplicateNotifications([...this.localNotifications, ...cachedFromStorage]);
+        list = merged;
       }
     } catch (error) {
-      console.warn('[NotificationService] Using cached notifications:', error);
-      list = [...this.localNotifications];
+      console.warn('[NotificationService] Using cached notifications from storage:', error);
+      const merged = deduplicateNotifications([...this.localNotifications, ...cachedFromStorage]);
+      list = merged;
     }
 
     // Apply user-scoped overlay
@@ -244,7 +270,7 @@ class NotificationService {
   }
 
   /**
-   * Subscribes to real-time updates for user notifications
+   * Subscribes to real-time updates for user notifications with offline fallback and cross-tab sync
    */
   subscribeToUserNotifications(
     userId: string,
@@ -254,14 +280,31 @@ class NotificationService {
   ): () => void {
     const currentUid = auth.currentUser?.uid || userId || currentUser?.uid;
 
+    // Immediately emit cached notifications so UI does not block
+    this.getUserNotifications(userId, userRole, currentUser).then((cached) => {
+      callback(cached);
+    });
+
+    // Cross-tab coordination listener (syncs read/create across tabs)
+    const unsubCoordination = coordinationService.subscribeToSignals((msg) => {
+      if (msg.type === 'notification_state_changed') {
+        this.getUserNotifications(userId, userRole, currentUser).then(callback);
+      }
+    });
+
     if (!auth.currentUser || (!userId && !currentUser)) {
-      const filtered = this.applyUserOverlay(this.localNotifications, currentUid).filter((n) => !n.isDeleted);
-      callback(filtered);
-      return () => {};
+      return () => {
+        unsubCoordination();
+      };
     }
     const colRef = collection(db, COLLECTION_NAME);
 
     const processDocs = (rawDocs: Notification[]) => {
+      // Reconcile and save to durable IndexedDB cache
+      offlineStorage.putCachedNotifications(rawDocs).catch((e) => {
+        console.warn('[NotificationService] Error caching realtime snapshot docs:', e);
+      });
+
       const docsWithOverlay = this.applyUserOverlay(rawDocs, currentUid);
       let list = docsWithOverlay.filter((n) => !n.isDeleted);
 
@@ -302,11 +345,17 @@ class NotificationService {
           this.getUserNotifications(userId, userRole, currentUser).then(callback);
         }
       );
-      return unsub;
+
+      return () => {
+        unsub();
+        unsubCoordination();
+      };
     } catch (err) {
       console.warn('[NotificationService] Listener setup error:', err);
       this.getUserNotifications(userId, userRole, currentUser).then(callback);
-      return () => {};
+      return () => {
+        unsubCoordination();
+      };
     }
   }
 
@@ -319,7 +368,7 @@ class NotificationService {
   }
 
   /**
-   * Create a new notification
+   * Create a new notification with durable offline storage
    */
   async createNotification(data: {
     userId: string;
@@ -356,6 +405,19 @@ class NotificationService {
     };
 
     this.localNotifications.unshift(newNotif);
+
+    // Save immediately into durable IndexedDB cache
+    await offlineStorage.putCachedEntity('notifications', id, newNotif, {
+      updatedAt: now,
+    }).catch((e) => {
+      console.warn('[NotificationService] Failed to cache newly created notification:', e);
+    });
+
+    // Notify other tabs via coordination broadcast
+    coordinationService.broadcast('notification_state_changed', {
+      action: 'create',
+      notificationId: id,
+    });
 
     const session = getCurrentSessionUser();
     const isPermitted =
@@ -439,7 +501,7 @@ class NotificationService {
   }
 
   /**
-   * Mark single notification as read
+   * Mark single notification as read with durable offline persistence
    */
   async markAsRead(notificationId: string): Promise<void> {
     if (!notificationId || notificationId === 'undefined' || notificationId === 'null') {
@@ -463,6 +525,26 @@ class NotificationService {
       item.isRead = true;
       item.readAt = now;
     }
+
+    // Update cached entity in IndexedDB
+    try {
+      const cached = await offlineStorage.getCachedEntity<Notification>('notifications', notificationId);
+      if (cached && cached.data) {
+        await offlineStorage.putCachedEntity('notifications', notificationId, {
+          ...cached.data,
+          isRead: true,
+          readAt: now,
+        }, { updatedAt: now });
+      }
+    } catch (e) {
+      console.warn('[NotificationService] Failed to update read state in cached entity:', e);
+    }
+
+    // Broadcast update to peer tabs
+    coordinationService.broadcast('notification_state_changed', {
+      action: 'read',
+      notificationId,
+    });
 
     let targetUserId = item?.userId;
     if (!targetUserId) {
@@ -518,7 +600,7 @@ class NotificationService {
   }
 
   /**
-   * Delete single notification
+   * Delete single notification with durable offline persistence
    */
   async deleteNotification(notificationId: string): Promise<void> {
     if (!notificationId || notificationId === 'undefined' || notificationId === 'null') {
@@ -542,6 +624,19 @@ class NotificationService {
       item.isDeleted = true;
       item.deletedAt = now;
     }
+
+    // Delete or soft-delete from IndexedDB cache
+    try {
+      await offlineStorage.deleteCachedNotification(notificationId);
+    } catch (e) {
+      console.warn('[NotificationService] Failed to delete cached notification from storage:', e);
+    }
+
+    // Broadcast deletion to peer tabs
+    coordinationService.broadcast('notification_state_changed', {
+      action: 'delete',
+      notificationId,
+    });
 
     let targetUserId = item?.userId;
     if (!targetUserId) {
@@ -596,3 +691,4 @@ class NotificationService {
 }
 
 export const notificationService = new NotificationService();
+
