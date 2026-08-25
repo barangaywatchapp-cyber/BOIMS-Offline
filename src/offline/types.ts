@@ -41,6 +41,12 @@ export interface OfflineQueueItem {
 
   /** Authoritative remote or cached updatedAt when mutation was authored */
   baseUpdatedAt?: string;
+
+  /** UID of the user who authored the mutation */
+  userId?: string;
+
+  /** Role of the user who authored the mutation */
+  userRole?: string;
 }
 
 export interface OfflineSyncResult {
@@ -1094,5 +1100,1222 @@ export function auditNotificationForSecrets(record: unknown): boolean {
 
   return check(record);
 }
+
+// =========================================================================
+// Phase 10 — Offline Data Freshness, Reconciliation & Stale-Cache Management
+// =========================================================================
+
+export type CacheFreshnessStatus =
+  | 'fresh'
+  | 'stale'
+  | 'expired'
+  | 'missing'
+  | 'refreshing';
+
+export interface CollectionFreshnessPolicy {
+  collectionName: string;
+  freshnessTtlMs: number;
+  maxRetentionTtlMs: number;
+  allowOfflineUsageWhenStale: boolean;
+  allowOfflineUsageWhenExpired: boolean;
+  autoRefreshOnStale: boolean;
+}
+
+export const COLLECTION_FRESHNESS_POLICIES: Record<string, CollectionFreshnessPolicy> = {
+  reports: {
+    collectionName: 'reports',
+    freshnessTtlMs: 5 * 60 * 1000, // 5 minutes
+    maxRetentionTtlMs: 24 * 60 * 60 * 1000, // 24 hours
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+  announcements: {
+    collectionName: 'announcements',
+    freshnessTtlMs: 15 * 60 * 1000, // 15 minutes
+    maxRetentionTtlMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+  certificateRequests: {
+    collectionName: 'certificateRequests',
+    freshnessTtlMs: 10 * 60 * 1000, // 10 minutes
+    maxRetentionTtlMs: 3 * 24 * 60 * 60 * 1000, // 3 days
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+  certificates: {
+    collectionName: 'certificates',
+    freshnessTtlMs: 10 * 60 * 1000, // 10 minutes
+    maxRetentionTtlMs: 3 * 24 * 60 * 60 * 1000, // 3 days
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+  blotterCases: {
+    collectionName: 'blotterCases',
+    freshnessTtlMs: 15 * 60 * 1000, // 15 minutes
+    maxRetentionTtlMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+  inventory: {
+    collectionName: 'inventory',
+    freshnessTtlMs: 10 * 60 * 1000, // 10 minutes
+    maxRetentionTtlMs: 3 * 24 * 60 * 60 * 1000, // 3 days
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+  residents: {
+    collectionName: 'residents',
+    freshnessTtlMs: 30 * 60 * 1000, // 30 minutes
+    maxRetentionTtlMs: 14 * 24 * 60 * 60 * 1000, // 14 days
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+  households: {
+    collectionName: 'households',
+    freshnessTtlMs: 30 * 60 * 1000, // 30 minutes
+    maxRetentionTtlMs: 14 * 24 * 60 * 60 * 1000, // 14 days
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+  householdInvites: {
+    collectionName: 'householdInvites',
+    freshnessTtlMs: 10 * 60 * 1000, // 10 minutes
+    maxRetentionTtlMs: 3 * 24 * 60 * 60 * 1000, // 3 days
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+  notifications: {
+    collectionName: 'notifications',
+    freshnessTtlMs: 2 * 60 * 1000, // 2 minutes
+    maxRetentionTtlMs: 48 * 60 * 60 * 1000, // 48 hours
+    allowOfflineUsageWhenStale: true,
+    allowOfflineUsageWhenExpired: false,
+    autoRefreshOnStale: true,
+  },
+};
+
+export const DEFAULT_COLLECTION_FRESHNESS_POLICY: CollectionFreshnessPolicy = {
+  collectionName: 'default',
+  freshnessTtlMs: 15 * 60 * 1000, // 15 minutes
+  maxRetentionTtlMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+  allowOfflineUsageWhenStale: true,
+  allowOfflineUsageWhenExpired: false,
+  autoRefreshOnStale: true,
+};
+
+export function getFreshnessPolicyForCollection(collectionName: string): CollectionFreshnessPolicy {
+  if (COLLECTION_FRESHNESS_POLICIES[collectionName]) {
+    return COLLECTION_FRESHNESS_POLICIES[collectionName];
+  }
+  return {
+    ...DEFAULT_COLLECTION_FRESHNESS_POLICY,
+    collectionName,
+  };
+}
+
+export interface FreshnessEvaluationResult {
+  status: CacheFreshnessStatus;
+  collectionName: string;
+  recordId: string;
+  ageMs: number;
+  cachedAt: string | null;
+  updatedAt: string | null;
+  staleAt: string | null;
+  expiresAt: string | null;
+  shouldRefresh: boolean;
+  isUsableOffline: boolean;
+  policy: CollectionFreshnessPolicy;
+}
+
+export interface CollectionFreshnessSummary {
+  collectionName: string;
+  total: number;
+  freshCount: number;
+  staleCount: number;
+  expiredCount: number;
+  overallStatus: 'fresh' | 'stale' | 'expired' | 'empty';
+  oldestAgeMs: number;
+  newestAgeMs: number;
+  shouldRefresh: boolean;
+  policy: CollectionFreshnessPolicy;
+}
+
+/**
+ * Deterministic, side-effect free evaluation of cached entity freshness.
+ */
+export function evaluateCacheFreshness(
+  entity: CachedEntity | null | undefined,
+  collectionName: string,
+  options?: {
+    recordId?: string;
+    now?: number | string;
+    isRefreshing?: boolean;
+    customPolicy?: Partial<CollectionFreshnessPolicy>;
+  }
+): FreshnessEvaluationResult {
+  const basePolicy = getFreshnessPolicyForCollection(collectionName);
+  const policy: CollectionFreshnessPolicy = {
+    ...basePolicy,
+    ...(options?.customPolicy || {}),
+  };
+
+  const recordId = entity?.recordId || options?.recordId || 'unknown';
+
+  if (!entity) {
+    return {
+      status: 'missing',
+      collectionName,
+      recordId,
+      ageMs: -1,
+      cachedAt: null,
+      updatedAt: null,
+      staleAt: null,
+      expiresAt: null,
+      shouldRefresh: true,
+      isUsableOffline: false,
+      policy,
+    };
+  }
+
+  const nowMs =
+    options?.now !== undefined
+      ? typeof options.now === 'number'
+        ? options.now
+        : new Date(options.now).getTime()
+      : Date.now();
+
+  const timestampStr = entity.cachedAt || entity.updatedAt;
+  const timestampMs = timestampStr ? new Date(timestampStr).getTime() : NaN;
+
+  if (isNaN(timestampMs)) {
+    // If timestamp cannot be parsed, treat as expired
+    return {
+      status: 'expired',
+      collectionName,
+      recordId,
+      ageMs: Infinity,
+      cachedAt: entity.cachedAt || null,
+      updatedAt: entity.updatedAt || null,
+      staleAt: null,
+      expiresAt: null,
+      shouldRefresh: true,
+      isUsableOffline: policy.allowOfflineUsageWhenExpired,
+      policy,
+    };
+  }
+
+  // Calculate age clamped to non-negative (handling small clock skew safely)
+  const ageMs = Math.max(0, nowMs - timestampMs);
+
+  const staleAt = new Date(timestampMs + policy.freshnessTtlMs).toISOString();
+  const expiresAt = new Date(timestampMs + policy.maxRetentionTtlMs).toISOString();
+
+  if (options?.isRefreshing) {
+    const isWithinRetention = ageMs <= policy.maxRetentionTtlMs;
+    return {
+      status: 'refreshing',
+      collectionName,
+      recordId,
+      ageMs,
+      cachedAt: entity.cachedAt || null,
+      updatedAt: entity.updatedAt || null,
+      staleAt,
+      expiresAt,
+      shouldRefresh: false,
+      isUsableOffline: isWithinRetention || policy.allowOfflineUsageWhenExpired,
+      policy,
+    };
+  }
+
+  if (ageMs <= policy.freshnessTtlMs) {
+    return {
+      status: 'fresh',
+      collectionName,
+      recordId,
+      ageMs,
+      cachedAt: entity.cachedAt || null,
+      updatedAt: entity.updatedAt || null,
+      staleAt,
+      expiresAt,
+      shouldRefresh: false,
+      isUsableOffline: true,
+      policy,
+    };
+  }
+
+  if (ageMs <= policy.maxRetentionTtlMs) {
+    return {
+      status: 'stale',
+      collectionName,
+      recordId,
+      ageMs,
+      cachedAt: entity.cachedAt || null,
+      updatedAt: entity.updatedAt || null,
+      staleAt,
+      expiresAt,
+      shouldRefresh: policy.autoRefreshOnStale,
+      isUsableOffline: policy.allowOfflineUsageWhenStale,
+      policy,
+    };
+  }
+
+  return {
+    status: 'expired',
+    collectionName,
+    recordId,
+    ageMs,
+    cachedAt: entity.cachedAt || null,
+    updatedAt: entity.updatedAt || null,
+    staleAt,
+    expiresAt,
+    shouldRefresh: true,
+    isUsableOffline: policy.allowOfflineUsageWhenExpired,
+    policy,
+  };
+}
+
+/**
+ * Evaluates collection-level freshness across an array of cached entities.
+ */
+export function evaluateCollectionFreshness(
+  entities: CachedEntity[],
+  collectionName: string,
+  options?: {
+    now?: number | string;
+    isRefreshing?: boolean;
+    customPolicy?: Partial<CollectionFreshnessPolicy>;
+  }
+): CollectionFreshnessSummary {
+  const policy = {
+    ...getFreshnessPolicyForCollection(collectionName),
+    ...(options?.customPolicy || {}),
+  };
+
+  if (!entities || entities.length === 0) {
+    return {
+      collectionName,
+      total: 0,
+      freshCount: 0,
+      staleCount: 0,
+      expiredCount: 0,
+      overallStatus: 'empty',
+      oldestAgeMs: -1,
+      newestAgeMs: -1,
+      shouldRefresh: true,
+      policy,
+    };
+  }
+
+  let freshCount = 0;
+  let staleCount = 0;
+  let expiredCount = 0;
+  let oldestAgeMs = 0;
+  let newestAgeMs = Infinity;
+
+  for (const entity of entities) {
+    const evalRes = evaluateCacheFreshness(entity, collectionName, options);
+    if (evalRes.status === 'fresh' || evalRes.status === 'refreshing') {
+      freshCount++;
+    } else if (evalRes.status === 'stale') {
+      staleCount++;
+    } else {
+      expiredCount++;
+    }
+
+    if (evalRes.ageMs >= 0) {
+      if (evalRes.ageMs > oldestAgeMs) oldestAgeMs = evalRes.ageMs;
+      if (evalRes.ageMs < newestAgeMs) newestAgeMs = evalRes.ageMs;
+    }
+  }
+
+  if (newestAgeMs === Infinity) newestAgeMs = 0;
+
+  let overallStatus: 'fresh' | 'stale' | 'expired' | 'empty' = 'fresh';
+  if (expiredCount > 0) {
+    overallStatus = 'expired';
+  } else if (staleCount > 0) {
+    overallStatus = 'stale';
+  }
+
+  const shouldRefresh = expiredCount > 0 || staleCount > 0;
+
+  return {
+    collectionName,
+    total: entities.length,
+    freshCount,
+    staleCount,
+    expiredCount,
+    overallStatus,
+    oldestAgeMs,
+    newestAgeMs,
+    shouldRefresh,
+    policy,
+  };
+}
+
+/**
+ * Audits freshness metadata and evaluation results for absence of secrets or sensitive tokens.
+ */
+export function auditFreshnessMetadataForSecrets(evaluation: unknown): boolean {
+  if (!evaluation || typeof evaluation !== 'object') return true;
+  const sensitiveKeys = [
+    'password',
+    'token',
+    'idToken',
+    'refreshToken',
+    'apiKey',
+    'secret',
+    'privateKey',
+    'credential',
+    'fcmToken',
+  ];
+
+  const check = (obj: any): boolean => {
+    for (const key of Object.keys(obj)) {
+      const lowerKey = key.toLowerCase();
+      if (sensitiveKeys.some((s) => lowerKey === s.toLowerCase() || lowerKey.includes('secret') || lowerKey.includes('token') && !lowerKey.includes('report') && !lowerKey.includes('announcement'))) {
+        return false;
+      }
+      if (obj[key] && typeof obj[key] === 'object') {
+        if (!check(obj[key])) return false;
+      }
+    }
+    return true;
+  };
+
+  return check(evaluation);
+}
+
+// =========================================================================
+// Phase 11 — Offline Data Integrity, Recovery & Corruption Resilience Contracts
+// =========================================================================
+
+export type CorruptionClassification =
+  | 'valid'
+  | 'malformed'
+  | 'missing_required_field'
+  | 'invalid_timestamp'
+  | 'invalid_enum'
+  | 'invalid_identifier'
+  | 'invalid_schema_version'
+  | 'invalid_payload'
+  | 'expired'
+  | 'orphaned'
+  | 'inconsistent_state'
+  | 'contains_forbidden_credentials';
+
+export const STORAGE_SCHEMA_VERSION = 3;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 5;
+
+export interface IntegrityValidationResult<T = unknown> {
+  valid: boolean;
+  classification: CorruptionClassification;
+  error?: string;
+  normalized?: T;
+  details?: Record<string, unknown>;
+}
+
+export interface StorageIntegrityAuditResult {
+  auditedAt: string;
+  isClean: boolean;
+  queue: {
+    total: number;
+    valid: number;
+    corrupt: number;
+    quarantined: number;
+  };
+  cache: {
+    total: number;
+    valid: number;
+    corrupt: number;
+    pruned: number;
+  };
+  dlq: {
+    total: number;
+    valid: number;
+    corrupt: number;
+    unsupportedVersion: number;
+  };
+  session: {
+    status: 'valid' | 'expired' | 'corrupt' | 'missing';
+    uid?: string;
+  };
+  lease: {
+    status: 'active' | 'expired' | 'corrupt' | 'none';
+    tabId?: string;
+  };
+  issues: Array<{
+    store: 'offlineQueue' | 'offlineEntities' | 'offlineDLQ' | 'offlineMetadata';
+    id: string;
+    classification: CorruptionClassification;
+    message: string;
+  }>;
+}
+
+/**
+ * Scans a record recursively for forbidden authentication credentials,
+ * secrets, private keys, or session tokens.
+ */
+export function auditRecordForForbiddenCredentials(record: unknown): {
+  containsSecrets: boolean;
+  forbiddenKeys: string[];
+} {
+  if (!record || typeof record !== 'object') {
+    return { containsSecrets: false, forbiddenKeys: [] };
+  }
+
+  const forbiddenKeyPatterns = [
+    'password',
+    'idtoken',
+    'refreshtoken',
+    'fcmtoken',
+    'registrationtoken',
+    'apikey',
+    'privatekey',
+    'credential',
+    'authheader',
+    'clientsecret',
+    'serviceaccount',
+  ];
+
+  const foundKeys: string[] = [];
+
+  const inspect = (obj: any, path: string = ''): void => {
+    if (!obj || typeof obj !== 'object') return;
+
+    for (const key of Object.keys(obj)) {
+      const lowerKey = key.toLowerCase();
+      const currentPath = path ? `${path}.${key}` : key;
+
+      const isForbidden = forbiddenKeyPatterns.some((pattern) => {
+        if (lowerKey === pattern) return true;
+        if (lowerKey.includes('secret') && !lowerKey.includes('secretary')) return true;
+        if (lowerKey.includes('password') && !lowerKey.includes('mustchangepassword') && !lowerKey.includes('must_change_password')) return true;
+        if (lowerKey.includes('privatekey')) return true;
+        if (
+          lowerKey.includes('token') &&
+          !lowerKey.includes('report') &&
+          !lowerKey.includes('announcement') &&
+          !lowerKey.includes('certificate') &&
+          !lowerKey.includes('tokenize')
+        ) {
+          return true;
+        }
+        return false;
+      });
+
+      if (isForbidden) {
+        foundKeys.push(currentPath);
+      }
+
+      if (obj[key] && typeof obj[key] === 'object') {
+        inspect(obj[key], currentPath);
+      }
+    }
+  };
+
+  inspect(record);
+
+  return {
+    containsSecrets: foundKeys.length > 0,
+    forbiddenKeys: foundKeys,
+  };
+}
+
+/**
+ * Validates the structural and logical integrity of a CachedEntity record.
+ */
+export function validateCachedEntityIntegrity(
+  record: unknown
+): IntegrityValidationResult<CachedEntity> {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return {
+      valid: false,
+      classification: 'malformed',
+      error: 'Cached entity record must be a non-null object.',
+    };
+  }
+
+  const r = record as Record<string, any>;
+
+  // Check forbidden credentials
+  const secretsAudit = auditRecordForForbiddenCredentials(r);
+  if (secretsAudit.containsSecrets) {
+    return {
+      valid: false,
+      classification: 'contains_forbidden_credentials',
+      error: `Cached entity contains forbidden credential keys: ${secretsAudit.forbiddenKeys.join(', ')}`,
+    };
+  }
+
+  // Required field: collectionName
+  if (!r.collectionName || typeof r.collectionName !== 'string' || r.collectionName.trim() === '') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Cached entity collectionName is required.',
+    };
+  }
+
+  // Required field: recordId
+  if (
+    !r.recordId ||
+    typeof r.recordId !== 'string' ||
+    r.recordId.trim() === '' ||
+    r.recordId === 'undefined' ||
+    r.recordId === 'null'
+  ) {
+    return {
+      valid: false,
+      classification: 'invalid_identifier',
+      error: 'Cached entity recordId is missing or invalid.',
+    };
+  }
+
+  // Required field: data
+  if (r.data === undefined) {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Cached entity data payload is required.',
+    };
+  }
+
+  // Required field: cachedAt
+  if (!r.cachedAt || typeof r.cachedAt !== 'string') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Cached entity cachedAt timestamp is required.',
+    };
+  }
+
+  if (isNaN(new Date(r.cachedAt).getTime())) {
+    return {
+      valid: false,
+      classification: 'invalid_timestamp',
+      error: `Cached entity cachedAt '${r.cachedAt}' is not a valid ISO date.`,
+    };
+  }
+
+  // Optional: updatedAt
+  if (r.updatedAt !== undefined && (typeof r.updatedAt !== 'string' || isNaN(new Date(r.updatedAt).getTime()))) {
+    return {
+      valid: false,
+      classification: 'invalid_timestamp',
+      error: `Cached entity updatedAt '${r.updatedAt}' is not a valid ISO date.`,
+    };
+  }
+
+  // Schema version check
+  if (r.version !== undefined) {
+    if (typeof r.version === 'number' && (r.version < 0 || r.version > MAX_SUPPORTED_SCHEMA_VERSION)) {
+      return {
+        valid: false,
+        classification: 'invalid_schema_version',
+        error: `Cached entity version '${r.version}' exceeds maximum supported version.`,
+      };
+    }
+  }
+
+  const compoundId = `${r.collectionName}:${r.recordId}`;
+  const normalized: CachedEntity = {
+    id: r.id && typeof r.id === 'string' ? r.id : compoundId,
+    collectionName: r.collectionName,
+    recordId: r.recordId,
+    data: r.data,
+    cachedAt: r.cachedAt,
+    updatedAt: r.updatedAt,
+    version: r.version,
+  };
+
+  return {
+    valid: true,
+    classification: 'valid',
+    normalized,
+  };
+}
+
+/**
+ * Validates the structural and logical integrity of an OfflineMutation / OfflineQueueItem record.
+ */
+export function validateMutationIntegrity(
+  record: unknown
+): IntegrityValidationResult<OfflineMutation> {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return {
+      valid: false,
+      classification: 'malformed',
+      error: 'Mutation record must be a non-null object.',
+    };
+  }
+
+  const r = record as Record<string, any>;
+
+  // Check forbidden credentials
+  const secretsAudit = auditRecordForForbiddenCredentials(r);
+  if (secretsAudit.containsSecrets) {
+    return {
+      valid: false,
+      classification: 'contains_forbidden_credentials',
+      error: `Mutation record contains forbidden credential keys: ${secretsAudit.forbiddenKeys.join(', ')}`,
+    };
+  }
+
+  // Required: queueId
+  if (!r.queueId || typeof r.queueId !== 'string' || r.queueId.trim() === '') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Mutation queueId is required.',
+    };
+  }
+
+  // Required: operation
+  if (!r.operation || typeof r.operation !== 'string') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Mutation operation is required.',
+    };
+  }
+
+  if (!['create', 'update', 'delete'].includes(r.operation)) {
+    return {
+      valid: false,
+      classification: 'invalid_enum',
+      error: `Invalid mutation operation: '${r.operation}'. Must be create, update, or delete.`,
+    };
+  }
+
+  // Required: collectionName
+  if (!r.collectionName || typeof r.collectionName !== 'string' || r.collectionName.trim() === '') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Mutation collectionName is required.',
+    };
+  }
+
+  // Required: recordId
+  if (
+    !r.recordId ||
+    typeof r.recordId !== 'string' ||
+    r.recordId.trim() === '' ||
+    r.recordId === 'undefined' ||
+    r.recordId === 'null'
+  ) {
+    return {
+      valid: false,
+      classification: 'invalid_identifier',
+      error: 'Mutation recordId is missing or invalid.',
+    };
+  }
+
+  // Required payload for create/update
+  if (r.operation !== 'delete' && (r.payload === undefined || r.payload === null)) {
+    return {
+      valid: false,
+      classification: 'invalid_payload',
+      error: `Mutation payload is required for operation '${r.operation}'.`,
+    };
+  }
+
+  // Required: createdAt
+  if (!r.createdAt || typeof r.createdAt !== 'string') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Mutation createdAt is required.',
+    };
+  }
+
+  if (isNaN(new Date(r.createdAt).getTime())) {
+    return {
+      valid: false,
+      classification: 'invalid_timestamp',
+      error: `Mutation createdAt '${r.createdAt}' is not a valid ISO date.`,
+    };
+  }
+
+  // Optional: updatedAt
+  if (r.updatedAt !== undefined && (typeof r.updatedAt !== 'string' || isNaN(new Date(r.updatedAt).getTime()))) {
+    return {
+      valid: false,
+      classification: 'invalid_timestamp',
+      error: `Mutation updatedAt '${r.updatedAt}' is not a valid ISO date.`,
+    };
+  }
+
+  // Status check
+  if (r.status !== undefined && !['pending', 'syncing', 'failed', 'resolved'].includes(r.status)) {
+    return {
+      valid: false,
+      classification: 'invalid_enum',
+      error: `Invalid mutation status: '${r.status}'.`,
+    };
+  }
+
+  // Schema version check
+  if (r.schemaVersion !== undefined && (typeof r.schemaVersion !== 'number' || r.schemaVersion > MAX_SUPPORTED_SCHEMA_VERSION)) {
+    return {
+      valid: false,
+      classification: 'invalid_schema_version',
+      error: `Mutation schemaVersion '${r.schemaVersion}' exceeds supported versions.`,
+    };
+  }
+
+  const normalized: OfflineMutation = {
+    queueId: r.queueId,
+    operation: r.operation as OfflineOperation,
+    collectionName: r.collectionName,
+    recordId: r.recordId,
+    payload: r.payload,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt || r.createdAt,
+    retryCount: typeof r.retryCount === 'number' && r.retryCount >= 0 ? r.retryCount : 0,
+    status: r.status === 'syncing' ? 'pending' : (r.status || 'pending'),
+    userId: r.userId,
+    userRole: r.userRole,
+    clientGeneratedId: r.clientGeneratedId,
+    idempotencyKey: r.idempotencyKey,
+    optimistic: r.optimistic,
+    lastError: r.lastError,
+    lastErrorCode: r.lastErrorCode,
+    baseUpdatedAt: r.baseUpdatedAt,
+  };
+
+  return {
+    valid: true,
+    classification: 'valid',
+    normalized,
+  };
+}
+
+/**
+ * Validates the structural and logical integrity of a DeadLetterItem record.
+ */
+export function validateDLQItemIntegrity(
+  record: unknown
+): IntegrityValidationResult<DeadLetterItem> {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return {
+      valid: false,
+      classification: 'malformed',
+      error: 'DLQ item must be a non-null object.',
+    };
+  }
+
+  const r = record as Record<string, any>;
+
+  // Check forbidden credentials
+  const secretsAudit = auditRecordForForbiddenCredentials(r);
+  if (secretsAudit.containsSecrets) {
+    return {
+      valid: false,
+      classification: 'contains_forbidden_credentials',
+      error: `DLQ item contains forbidden credential keys: ${secretsAudit.forbiddenKeys.join(', ')}`,
+    };
+  }
+
+  // Required: dlqId
+  if (!r.dlqId || typeof r.dlqId !== 'string' || r.dlqId.trim() === '') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'DLQ dlqId is required.',
+    };
+  }
+
+  // Required: originalQueueId (orphaned if missing)
+  if (!r.originalQueueId || typeof r.originalQueueId !== 'string' || r.originalQueueId.trim() === '') {
+    return {
+      valid: false,
+      classification: 'orphaned',
+      error: 'DLQ item is missing its originalQueueId reference.',
+    };
+  }
+
+  // Required: operation
+  if (!r.operation || !['create', 'update', 'delete'].includes(r.operation)) {
+    return {
+      valid: false,
+      classification: 'invalid_enum',
+      error: `Invalid DLQ operation: '${r.operation}'.`,
+    };
+  }
+
+  // Required: collectionName
+  if (!r.collectionName || typeof r.collectionName !== 'string' || r.collectionName.trim() === '') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'DLQ collectionName is required.',
+    };
+  }
+
+  // Required: recordId
+  if (!r.recordId || typeof r.recordId !== 'string' || r.recordId.trim() === '') {
+    return {
+      valid: false,
+      classification: 'invalid_identifier',
+      error: 'DLQ recordId is missing or invalid.',
+    };
+  }
+
+  // Required: failureReason
+  const validReasons: DLQFailureReason[] = [
+    'max_retries_exceeded',
+    'permanent_error',
+    'security_rejection',
+    'structural_validation_failed',
+    'authentication_required',
+    'manual_quarantine',
+    'conflict_remote_newer',
+    'conflict_remote_deleted',
+    'conflict_create_collision',
+    'conflict_stale_delete',
+  ];
+
+  if (!r.failureReason || typeof r.failureReason !== 'string') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'DLQ failureReason is required.',
+    };
+  }
+
+  if (!validReasons.includes(r.failureReason as DLQFailureReason)) {
+    return {
+      valid: false,
+      classification: 'invalid_enum',
+      error: `Invalid DLQ failureReason: '${r.failureReason}'.`,
+    };
+  }
+
+  // Required timestamps
+  if (!r.failedAt || isNaN(new Date(r.failedAt).getTime())) {
+    return {
+      valid: false,
+      classification: 'invalid_timestamp',
+      error: `DLQ failedAt '${r.failedAt}' is not a valid ISO date.`,
+    };
+  }
+
+  // Schema version check
+  if (r.schemaVersion !== undefined && (typeof r.schemaVersion !== 'number' || r.schemaVersion > MAX_SUPPORTED_SCHEMA_VERSION)) {
+    return {
+      valid: false,
+      classification: 'invalid_schema_version',
+      error: `DLQ schemaVersion '${r.schemaVersion}' exceeds supported versions.`,
+    };
+  }
+
+  const normalized: DeadLetterItem = {
+    dlqId: r.dlqId,
+    originalQueueId: r.originalQueueId,
+    operation: r.operation as OfflineOperation,
+    collectionName: r.collectionName,
+    recordId: r.recordId,
+    payload: r.payload,
+    originalCreatedAt: r.originalCreatedAt || r.failedAt,
+    failedAt: r.failedAt,
+    retryCount: typeof r.retryCount === 'number' ? r.retryCount : 0,
+    lastError: r.lastError,
+    lastErrorCode: r.lastErrorCode,
+    failureReason: r.failureReason as DLQFailureReason,
+    originatingUserId: r.originatingUserId,
+    originatingUserRole: r.originatingUserRole,
+    schemaVersion: r.schemaVersion || DLQ_SCHEMA_VERSION,
+    baseUpdatedAt: r.baseUpdatedAt,
+    conflictDetails: r.conflictDetails,
+  };
+
+  return {
+    valid: true,
+    classification: 'valid',
+    normalized,
+  };
+}
+
+/**
+ * Validates the structural and logical integrity of an OfflineSessionRecord.
+ */
+export function validateSessionIntegrity(
+  record: unknown,
+  nowMs: number = Date.now()
+): IntegrityValidationResult<OfflineSessionRecord> {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return {
+      valid: false,
+      classification: 'malformed',
+      error: 'Offline session record must be a non-null object.',
+    };
+  }
+
+  const r = record as Record<string, any>;
+
+  // Check forbidden credentials
+  const secretsAudit = auditRecordForForbiddenCredentials(r);
+  if (secretsAudit.containsSecrets) {
+    return {
+      valid: false,
+      classification: 'contains_forbidden_credentials',
+      error: `Session contains forbidden credentials: ${secretsAudit.forbiddenKeys.join(', ')}`,
+    };
+  }
+
+  // Required: uid
+  if (!r.uid || typeof r.uid !== 'string' || r.uid.trim() === '') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Session uid is required.',
+    };
+  }
+
+  // Required: user object with role
+  if (!r.user || typeof r.user !== 'object' || !r.user.role) {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Session user object with role is required.',
+    };
+  }
+
+  // Status check
+  if (
+    r.sessionState !== undefined &&
+    !['online_authenticated', 'offline_available', 'expired'].includes(r.sessionState)
+  ) {
+    return {
+      valid: false,
+      classification: 'invalid_enum',
+      error: `Invalid sessionState: '${r.sessionState}'.`,
+    };
+  }
+
+  // Timestamps check
+  if (!r.expiresAt || isNaN(new Date(r.expiresAt).getTime())) {
+    return {
+      valid: false,
+      classification: 'invalid_timestamp',
+      error: `Session expiresAt '${r.expiresAt}' is not a valid ISO date.`,
+    };
+  }
+
+  // Schema version check
+  if (r.schemaVersion !== undefined && (typeof r.schemaVersion !== 'number' || r.schemaVersion > MAX_SUPPORTED_SCHEMA_VERSION)) {
+    return {
+      valid: false,
+      classification: 'invalid_schema_version',
+      error: `Session schemaVersion '${r.schemaVersion}' exceeds supported versions.`,
+    };
+  }
+
+  // Expiration check
+  const expiresMs = new Date(r.expiresAt).getTime();
+  if (expiresMs <= nowMs || r.sessionState === 'expired') {
+    return {
+      valid: false,
+      classification: 'expired',
+      error: `Session expired at ${r.expiresAt}.`,
+    };
+  }
+
+  const normalized: OfflineSessionRecord = {
+    uid: r.uid,
+    user: r.user,
+    sessionState: r.sessionState || 'online_authenticated',
+    authenticatedAt: r.authenticatedAt || new Date(nowMs).toISOString(),
+    lastActiveAt: r.lastActiveAt || new Date(nowMs).toISOString(),
+    expiresAt: r.expiresAt,
+    schemaVersion: r.schemaVersion || OFFLINE_SESSION_SCHEMA_VERSION,
+  };
+
+  return {
+    valid: true,
+    classification: 'valid',
+    normalized,
+  };
+}
+
+/**
+ * Validates the structural and logical integrity of a ReplayCoordinationLease.
+ */
+export function validateReplayLeaseIntegrity(
+  record: unknown,
+  _nowMs: number = Date.now()
+): IntegrityValidationResult<ReplayCoordinationLease> {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return {
+      valid: false,
+      classification: 'malformed',
+      error: 'Replay lease record must be a non-null object.',
+    };
+  }
+
+  const r = record as Record<string, any>;
+
+  if (r.key !== COORDINATION_LEASE_KEY) {
+    return {
+      valid: false,
+      classification: 'invalid_identifier',
+      error: `Invalid lease key: '${r.key}'. Expected '${COORDINATION_LEASE_KEY}'.`,
+    };
+  }
+
+  if (!r.tabId || typeof r.tabId !== 'string' || r.tabId.trim() === '') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Lease tabId is required.',
+    };
+  }
+
+  if (!r.expiresAt || isNaN(new Date(r.expiresAt).getTime())) {
+    return {
+      valid: false,
+      classification: 'invalid_timestamp',
+      error: `Lease expiresAt '${r.expiresAt}' is not a valid ISO date.`,
+    };
+  }
+
+  // Check impossible timestamp (e.g., year < 2020)
+  const expYear = new Date(r.expiresAt).getFullYear();
+  if (expYear < 2020) {
+    return {
+      valid: false,
+      classification: 'inconsistent_state',
+      error: `Lease expiresAt '${r.expiresAt}' is impossible (year < 2020).`,
+    };
+  }
+
+  if (r.schemaVersion !== undefined && (typeof r.schemaVersion !== 'number' || r.schemaVersion > MAX_SUPPORTED_SCHEMA_VERSION)) {
+    return {
+      valid: false,
+      classification: 'invalid_schema_version',
+      error: `Lease schemaVersion '${r.schemaVersion}' exceeds supported versions.`,
+    };
+  }
+
+  return {
+    valid: true,
+    classification: 'valid',
+    normalized: r as ReplayCoordinationLease,
+  };
+}
+
+/**
+ * Validates the structural and logical integrity of an OfflineNotificationRecord.
+ */
+export function validateNotificationIntegrity(
+  record: unknown
+): IntegrityValidationResult<OfflineNotificationRecord> {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return {
+      valid: false,
+      classification: 'malformed',
+      error: 'Notification record must be a non-null object.',
+    };
+  }
+
+  const r = record as Record<string, any>;
+
+  // Check forbidden credentials
+  const secretsAudit = auditRecordForForbiddenCredentials(r);
+  if (secretsAudit.containsSecrets) {
+    return {
+      valid: false,
+      classification: 'contains_forbidden_credentials',
+      error: `Notification contains forbidden credential keys: ${secretsAudit.forbiddenKeys.join(', ')}`,
+    };
+  }
+
+  if (!r.notificationId || typeof r.notificationId !== 'string' || r.notificationId.trim() === '') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Notification notificationId is required.',
+    };
+  }
+
+  // User partition check (orphaned if missing)
+  if (!r.userId || typeof r.userId !== 'string' || r.userId.trim() === '') {
+    return {
+      valid: false,
+      classification: 'orphaned',
+      error: 'Notification is missing its userId partition.',
+    };
+  }
+
+  if (!r.title || typeof r.title !== 'string' || r.title.trim() === '') {
+    return {
+      valid: false,
+      classification: 'missing_required_field',
+      error: 'Notification title is required.',
+    };
+  }
+
+  if (!r.createdAt || isNaN(new Date(r.createdAt).getTime())) {
+    return {
+      valid: false,
+      classification: 'invalid_timestamp',
+      error: `Notification createdAt '${r.createdAt}' is not a valid ISO date.`,
+    };
+  }
+
+  if (r.schemaVersion !== undefined && (typeof r.schemaVersion !== 'number' || r.schemaVersion > MAX_SUPPORTED_SCHEMA_VERSION)) {
+    return {
+      valid: false,
+      classification: 'invalid_schema_version',
+      error: `Notification schemaVersion '${r.schemaVersion}' exceeds supported versions.`,
+    };
+  }
+
+  const normalized: OfflineNotificationRecord = {
+    notificationId: r.notificationId,
+    userId: r.userId,
+    title: r.title,
+    message: r.message || '',
+    type: r.type || 'general',
+    priority: r.priority || 'medium',
+    isRead: Boolean(r.isRead),
+    readAt: r.readAt,
+    link: r.link,
+    reportId: r.reportId,
+    certificateId: r.certificateId,
+    announcementId: r.announcementId,
+    inventoryId: r.inventoryId,
+    icon: r.icon,
+    createdBy: r.createdBy,
+    targetJurisdiction: r.targetJurisdiction,
+    purok: r.purok,
+    metadata: r.metadata,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+    isDeleted: Boolean(r.isDeleted),
+    deletedAt: r.deletedAt,
+    syncState: r.syncState || 'synced',
+    schemaVersion: r.schemaVersion || NOTIFICATION_SCHEMA_VERSION,
+  };
+
+  return {
+    valid: true,
+    classification: 'valid',
+    normalized,
+  };
+}
+
 
 

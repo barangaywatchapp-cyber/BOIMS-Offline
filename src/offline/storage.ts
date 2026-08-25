@@ -67,6 +67,22 @@ class OfflineStorage {
   private dbPromise: Promise<IDBDatabase> | null = null;
 
   /**
+   * Closes the active IndexedDB connection and resets the database promise.
+   * Useful for testing restart resilience and database recovery.
+   */
+  async closeDatabase(): Promise<void> {
+    if (this.dbPromise) {
+      try {
+        const db = await this.dbPromise;
+        db.close();
+      } catch {
+        // Ignore close errors
+      }
+      this.dbPromise = null;
+    }
+  }
+
+  /**
    * Open or create the BOIMS offline database.
    */
   private openDatabase(): Promise<IDBDatabase> {
@@ -605,6 +621,63 @@ class OfflineStorage {
   }
 
   /**
+   * Retrieves all cached entities across all collections.
+   * Essential for full database integrity auditing and corruption recovery.
+   */
+  async getAllCachedEntities<T = unknown>(): Promise<Array<CachedEntity<T>>> {
+    const db = await this.openDatabase();
+
+    return new Promise<Array<CachedEntity<T>>>((resolve, reject) => {
+      const transaction = db.transaction(ENTITY_CACHE_STORE, 'readonly');
+      const store = transaction.objectStore(ENTITY_CACHE_STORE);
+
+      const request = store.getAll();
+
+      request.onsuccess = () => {
+        const results = (request.result as Array<CachedEntity<T>>) ?? [];
+        resolve(results);
+      };
+
+      request.onerror = () => {
+        reject(
+          request.error ??
+            new Error('Failed to retrieve all cached entities.')
+        );
+      };
+    });
+  }
+
+  /**
+   * Deletes a single cached entity by its compound key.
+   */
+  async deleteCachedEntityByKey(id: string): Promise<void> {
+    const db = await this.openDatabase();
+
+    return new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(ENTITY_CACHE_STORE, 'readwrite');
+      const store = transaction.objectStore(ENTITY_CACHE_STORE);
+
+      store.delete(id);
+
+      transaction.oncomplete = () => resolve();
+
+      transaction.onerror = () => {
+        reject(
+          transaction.error ??
+            new Error(`Failed to delete cached entity ${id}.`)
+        );
+      };
+
+      transaction.onabort = () => {
+        reject(
+          transaction.error ??
+            new Error(`Deleting cached entity ${id} was aborted.`)
+        );
+      };
+    });
+  }
+
+  /**
    * Deletes a single cached entity.
    */
   async deleteCachedEntity(
@@ -765,6 +838,24 @@ class OfflineStorage {
         );
       };
     });
+  }
+
+  /**
+   * Convenience alias to persist session directly from a User object or OfflineSessionRecord.
+   */
+  async putSession(userOrSession: any): Promise<void> {
+    if (userOrSession && 'role' in userOrSession && 'uid' in userOrSession) {
+      return this.saveSession({
+        uid: userOrSession.uid,
+        user: userOrSession,
+        sessionState: 'online_authenticated',
+        authenticatedAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + OFFLINE_SESSION_TTL_MS).toISOString(),
+        schemaVersion: OFFLINE_SESSION_SCHEMA_VERSION,
+      });
+    }
+    return this.saveSession(userOrSession);
   }
 
   /**
