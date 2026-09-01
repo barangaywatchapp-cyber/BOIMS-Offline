@@ -41,7 +41,7 @@ import {
   FileCheck2,
   FileText,
 } from 'lucide-react';
-import { isReportOwner } from '../utils/jurisdictionUtils';
+import { isReportOwner, isReportAssignedTo } from '../utils/jurisdictionUtils';
 import { SecretaryDashboardView } from '../components/dashboard/SecretaryDashboardView';
 import { ChairmanDashboardView } from '../components/dashboard/ChairmanDashboardView';
 import { DeveloperDashboardView } from '../components/dashboard/DeveloperDashboardView';
@@ -88,11 +88,18 @@ export const DashboardShellPage: React.FC = () => {
   const [canViewQueue, setCanViewQueue] = useState<boolean>(true);
   const [hasDispatcherOnDuty, setHasDispatcherOnDuty] = useState<boolean>(true);
 
-  // Official Work Queue activeTab initializes strictly to 'all' (Resident Work Queue default)
-  const [activeTab, setActiveTab] = useState<QueueTab>('all');
+  // Official Work Queue activeTab initializes to 'assigned' for field responders, or 'all' for dispatchers/admins
+  const [activeTab, setActiveTab] = useState<QueueTab>(isFieldResponder ? 'assigned' : 'all');
   // Resident Dashboard activeTab initializes to 'pending'
   const [residentTab, setResidentTab] = useState<ResidentTab>('pending');
   const [search, setSearch] = useState<string>('');
+
+  // Synchronize activeTab when role/dutyMode resolves to field responder
+  useEffect(() => {
+    if (isFieldResponder && (activeTab === 'all' || activeTab === 'pending' || activeTab === 'onDuty')) {
+      setActiveTab('assigned');
+    }
+  }, [isFieldResponder, activeTab]);
 
   // Stable anchor and trigger state for auto-scrolling to the filtered work queue section
   const workQueueSectionRef = useRef<HTMLDivElement | null>(null);
@@ -141,8 +148,7 @@ export const DashboardShellPage: React.FC = () => {
       } else if (isFieldResponder) {
         const responderReports = allReports.filter((r) => {
           if (!UNRESOLVED_STATUSES.includes(r.status)) return false;
-          if (r.status === 'pending') return true;
-          return getReportResponders(r).some((responder) => responder.uid === user?.uid);
+          return isReportAssignedTo(r, user?.uid);
         });
         setReports(responderReports);
       } else {
@@ -192,12 +198,20 @@ export const DashboardShellPage: React.FC = () => {
     if (isFieldResponder) {
       return (
         getReportWorkflowCategory(r.status) === 'assigned' &&
-        getReportResponders(r).some((responder) => responder.uid === user?.uid)
+        isReportAssignedTo(r, user?.uid)
       );
     }
     return getReportWorkflowCategory(r.status) === 'assigned';
   }).length;
-  const inProgressCount = reports.filter((r) => getReportWorkflowCategory(r.status) === 'inProgress').length;
+  const inProgressCount = reports.filter((r) => {
+    if (isFieldResponder) {
+      return (
+        getReportWorkflowCategory(r.status) === 'inProgress' &&
+        isReportAssignedTo(r, user?.uid)
+      );
+    }
+    return getReportWorkflowCategory(r.status) === 'inProgress';
+  }).length;
   const criticalCount = reports.filter((r) => r.priority === 'critical').length;
   const onDutyCount = responders.length;
 
@@ -236,24 +250,42 @@ export const DashboardShellPage: React.FC = () => {
     if (activeTab === 'assigned') {
       if (isFieldResponder) {
         matchesTab =
-          cat === 'assigned' &&
-          getReportResponders(report).some((responder) => responder.uid === user?.uid);
+          cat === 'assigned' && isReportAssignedTo(report, user?.uid);
       } else {
         matchesTab = cat === 'assigned';
       }
     } else if (activeTab === 'pending') {
-      matchesTab = cat === 'pending';
+      if (isFieldResponder) {
+        matchesTab = false;
+      } else {
+        matchesTab = cat === 'pending';
+      }
     } else if (activeTab === 'inProgress') {
-      matchesTab = cat === 'inProgress';
+      if (isFieldResponder) {
+        matchesTab =
+          cat === 'inProgress' && isReportAssignedTo(report, user?.uid);
+      } else {
+        matchesTab = cat === 'inProgress';
+      }
     } else if (activeTab === 'critical') {
-      matchesTab = report.priority === 'critical';
+      if (isFieldResponder) {
+        matchesTab = report.priority === 'critical' && isReportAssignedTo(report, user?.uid);
+      } else {
+        matchesTab = report.priority === 'critical';
+      }
     } else if (activeTab === 'activeAssignments') {
       if (isFieldResponder) {
         matchesTab =
-          (cat === 'assigned' && getReportResponders(report).some((responder) => responder.uid === user?.uid)) ||
-          cat === 'inProgress';
+          (cat === 'assigned' || cat === 'inProgress') && isReportAssignedTo(report, user?.uid);
       } else {
         matchesTab = cat === 'assigned' || cat === 'inProgress';
+      }
+    } else if (activeTab === 'all') {
+      if (isFieldResponder) {
+        matchesTab =
+          (cat === 'assigned' || cat === 'inProgress') && isReportAssignedTo(report, user?.uid);
+      } else {
+        matchesTab = true;
       }
     }
 
@@ -549,8 +581,11 @@ export const DashboardShellPage: React.FC = () => {
               icon={<FileText className="w-8 h-8 text-blue-500" />}
               title="No Filed Incident Reports"
               description="You have not submitted any incident reports matching this status."
-              actionLabel="File New Incident Report"
-              onAction={() => navigate(ROUTES.REPORT_CREATE)}
+              action={
+                <Button variant="primary" size="sm" onClick={() => navigate(ROUTES.REPORT_CREATE)}>
+                  File New Incident Report
+                </Button>
+              }
             />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -1213,21 +1248,34 @@ export const DashboardShellPage: React.FC = () => {
           <EmptyState
             icon={<CheckCircle2 className="w-8 h-8 text-emerald-500" />}
             title={
-              activeTab === 'assigned'
+              isFieldResponder
+                ? activeTab === 'assigned'
+                  ? 'No Assigned Tasks'
+                  : activeTab === 'inProgress'
+                  ? 'No Tasks In Progress'
+                  : activeTab === 'activeAssignments'
+                  ? 'No Active Assignments'
+                  : 'All Assigned Tasks Complete!'
+                : activeTab === 'assigned'
                 ? 'No Assigned Reports'
                 : activeTab === 'all'
                 ? 'Work Queue Clear!'
                 : `No ${activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} Reports`
             }
             description={
-              activeTab === 'assigned'
+              isFieldResponder
+                ? 'You have no active incident response tasks pending in this queue. Completed and resolved reports can be viewed in your report history.'
+                : activeTab === 'assigned'
                 ? 'There are currently no reports with assigned status in your active queue.'
                 : activeTab === 'all'
                 ? 'All incident reports in your jurisdiction are resolved, closed, or transferred.'
                 : 'There are currently no active reports matching this queue category.'
             }
-            actionLabel="View Reports History"
-            onAction={() => navigate(ROUTES.REPORTS)}
+            action={
+              <Button variant="outline" size="sm" onClick={() => navigate(ROUTES.REPORTS)}>
+                View Reports History
+              </Button>
+            }
           />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
