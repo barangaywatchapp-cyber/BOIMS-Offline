@@ -46,6 +46,43 @@ interface SecretaryDashboardViewProps {
 
 export type SecretaryTab = 'certificates' | 'registrations' | 'reports' | 'announcements' | 'blotter';
 
+interface SecretaryLastSeenState {
+  certificates: number;
+  reports: number;
+  households: number;
+  blotter: number;
+  announcements: number;
+  registrations: number;
+}
+
+const STORAGE_PREFIX = 'boims_secretary_last_seen_';
+
+function parseItemTimestamp(val: any): number {
+  if (!val) return 0;
+  if (typeof val === 'number') return val;
+  if (typeof val.toMillis === 'function') return val.toMillis();
+  if (typeof val.toDate === 'function') return val.toDate().getTime();
+  if (typeof val.seconds === 'number') return val.seconds * 1000;
+  if (typeof val === 'string') {
+    const parsed = new Date(val).getTime();
+    return isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+}
+
+const NewIndicator: React.FC<{ isInverse?: boolean }> = ({ isInverse }) => (
+  <span
+    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-black tracking-wider uppercase shadow-xs shrink-0 ${
+      isInverse
+        ? 'bg-white text-red-600 ring-1 ring-white/60'
+        : 'bg-red-600 text-white'
+    }`}
+  >
+    <span>NEW</span>
+    <span className={`w-1.5 h-1.5 rounded-full ${isInverse ? 'bg-red-600 animate-pulse' : 'bg-white animate-pulse'}`} />
+  </span>
+);
+
 export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
   reports,
   loadingReports,
@@ -58,8 +95,43 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
 
   const workspaceRef = useRef<HTMLDivElement>(null);
 
+  const storageKey = `${STORAGE_PREFIX}${user?.uid || 'default'}`;
+
+  const [lastSeen, setLastSeen] = useState<SecretaryLastSeenState>(() => {
+    try {
+      const raw = localStorage.getItem(`${STORAGE_PREFIX}${user?.uid || 'default'}`);
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch (e) {
+      console.warn('[SecretaryDashboard] Failed to read last seen state:', e);
+    }
+    return {
+      certificates: 0,
+      reports: 0,
+      households: 0,
+      blotter: 0,
+      announcements: 0,
+      registrations: 0,
+    };
+  });
+
+  const markAsSeen = (moduleKey: keyof SecretaryLastSeenState) => {
+    const now = Date.now();
+    setLastSeen((prev) => {
+      const updated = { ...prev, [moduleKey]: now };
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+      } catch (e) {
+        console.warn('[SecretaryDashboard] Failed to save last seen state:', e);
+      }
+      return updated;
+    });
+  };
+
   const handleTabSelect = (tab: SecretaryTab, shouldScroll = false) => {
     setActiveTab(tab);
+    markAsSeen(tab);
     if (shouldScroll && workspaceRef.current) {
       const yOffset = -16;
       const element = workspaceRef.current;
@@ -119,6 +191,13 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
     };
   }, [isAuthInitialized, user?.uid, user?.role, user?.jurisdiction, user?.barangay]);
 
+  // Mark current tab as seen on initial mount once data is loaded or when tab changes
+  useEffect(() => {
+    if (!loadingData && activeTab) {
+      markAsSeen(activeTab);
+    }
+  }, [activeTab, loadingData]);
+
   // Counts for Summary Cards
   const activeCertificates = certificates.filter(
     (c) =>
@@ -157,6 +236,75 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
   const pendingHnrCount = numberChangeRequests.filter(
     (r) => r.status === 'pending_review'
   ).length;
+
+  // Real-time "NEW" indicator calculations based on data timestamps vs last-seen state
+  const latestCertTime = activeCertificates.reduce(
+    (max, c) => Math.max(max, parseItemTimestamp(c.createdAt), parseItemTimestamp(c.updatedAt)),
+    0
+  );
+  const hasNewCertificates = pendingCertsCount > 0 && latestCertTime > (lastSeen.certificates || 0);
+
+  const latestReportTime = reports.reduce(
+    (max, r) => Math.max(max, parseItemTimestamp(r.createdAt), parseItemTimestamp(r.updatedAt)),
+    0
+  );
+  const hasNewReports = activeReportsCount > 0 && latestReportTime > (lastSeen.reports || 0);
+
+  const pendingHnrRequests = numberChangeRequests.filter((r) => r.status === 'pending_review');
+  const pendingHhList = households.filter(
+    (h) =>
+      h.verificationStatus === 'pending_verification' &&
+      (!h.householdNumber || !h.householdNumber.trim() || h.householdNumber === 'HH-PENDING')
+  );
+  const latestHnrTime = pendingHnrRequests.reduce(
+    (max, r) => Math.max(max, parseItemTimestamp(r.createdAt), parseItemTimestamp(r.updatedAt)),
+    0
+  );
+  const latestHhTime = pendingHhList.reduce(
+    (max, h) => Math.max(max, parseItemTimestamp(h.createdAt), parseItemTimestamp(h.updatedAt)),
+    0
+  );
+  const latestHouseholdTime = Math.max(latestHnrTime, latestHhTime);
+  const hasNewHouseholds =
+    (pendingHnrRequests.length > 0 || pendingHhList.length > 0) &&
+    latestHouseholdTime > (lastSeen.households || 0);
+
+  const pendingBlotterList = blotters.filter(
+    (b) => (b.status === 'open' || b.status === 'underInvestigation' || b.status === 'scheduled') && !b.isDeleted
+  );
+  const latestBlotterTime = pendingBlotterList.reduce(
+    (max, b) =>
+      Math.max(
+        max,
+        parseItemTimestamp(b.createdAt),
+        parseItemTimestamp(b.incidentDate),
+        parseItemTimestamp(b.updatedAt)
+      ),
+    0
+  );
+  const hasNewBlotters = pendingBlotterList.length > 0 && latestBlotterTime > (lastSeen.blotter || 0);
+
+  const activeAnnouncementList = announcements.filter((a) => a.status === 'published' && !a.isDeleted);
+  const latestAnnTime = activeAnnouncementList.reduce(
+    (max, a) =>
+      Math.max(
+        max,
+        parseItemTimestamp(a.publishAt),
+        parseItemTimestamp(a.createdAt),
+        parseItemTimestamp(a.updatedAt)
+      ),
+    0
+  );
+  const hasNewAnnouncements = activeAnnouncementList.length > 0 && latestAnnTime > (lastSeen.announcements || 0);
+
+  const pendingRegList = registrations.filter(
+    (r) => r.status === 'pending' || r.status === 'underReview' || r.status === 'needsInfo'
+  );
+  const latestRegTime = pendingRegList.reduce(
+    (max, r) => Math.max(max, parseItemTimestamp(r.submittedAt), parseItemTimestamp(r.createdAt)),
+    0
+  );
+  const hasNewRegistrations = pendingRegList.length > 0 && latestRegTime > (lastSeen.registrations || 0);
 
   // Filtered lists based on search query
   const filteredCertificates = activeCertificates.filter((c) => {
@@ -221,17 +369,20 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
         <button
           type="button"
           onClick={() => handleTabSelect('certificates', true)}
-          className={`w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+          className={`w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 relative ${
             activeTab === 'certificates'
               ? 'bg-blue-600 text-white border-blue-600 shadow-md ring-2 ring-blue-500 ring-offset-2 -translate-y-0.5'
               : 'bg-white text-slate-900 border-slate-200/80 shadow-2xs hover:shadow-md hover:border-blue-300 hover:-translate-y-0.5'
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'certificates' ? 'text-blue-100' : 'text-slate-500'}`}>
-              Pending Certificates
-            </span>
-            <div className={`p-2 rounded-xl transition-colors ${activeTab === 'certificates' ? 'bg-white/20 text-white' : 'bg-blue-50 text-blue-600'}`}>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'certificates' ? 'text-blue-100' : 'text-slate-500'}`}>
+                Pending Certificates
+              </span>
+              {hasNewCertificates && <NewIndicator isInverse={activeTab === 'certificates'} />}
+            </div>
+            <div className={`p-2 rounded-xl transition-colors shrink-0 ${activeTab === 'certificates' ? 'bg-white/20 text-white' : 'bg-blue-50 text-blue-600'}`}>
               <FileCheck2 className="w-5 h-5" />
             </div>
           </div>
@@ -243,17 +394,20 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
         <button
           type="button"
           onClick={() => handleTabSelect('reports', true)}
-          className={`w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+          className={`w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 relative ${
             activeTab === 'reports'
               ? 'bg-rose-600 text-white border-rose-600 shadow-md ring-2 ring-rose-500 ring-offset-2 -translate-y-0.5'
               : 'bg-white text-slate-900 border-slate-200/80 shadow-2xs hover:shadow-md hover:border-rose-300 hover:-translate-y-0.5'
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'reports' ? 'text-rose-100' : 'text-slate-500'}`}>
-              Incident Reports
-            </span>
-            <div className={`p-2 rounded-xl transition-colors ${activeTab === 'reports' ? 'bg-white/20 text-white' : 'bg-rose-50 text-rose-600'}`}>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'reports' ? 'text-rose-100' : 'text-slate-500'}`}>
+                Incident Reports
+              </span>
+              {hasNewReports && <NewIndicator isInverse={activeTab === 'reports'} />}
+            </div>
+            <div className={`p-2 rounded-xl transition-colors shrink-0 ${activeTab === 'reports' ? 'bg-white/20 text-white' : 'bg-rose-50 text-rose-600'}`}>
               <AlertTriangle className="w-5 h-5" />
             </div>
           </div>
@@ -264,14 +418,20 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
         {/* Card 3: Household Registry */}
         <button
           type="button"
-          onClick={() => navigate(`${ROUTES.HOUSEHOLDS}?tab=number_requests`)}
-          className="w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 bg-white text-slate-900 border-slate-200/80 shadow-2xs hover:shadow-md hover:border-teal-300 hover:-translate-y-0.5"
+          onClick={() => {
+            markAsSeen('households');
+            navigate(`${ROUTES.HOUSEHOLDS}?tab=number_requests`);
+          }}
+          className="w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 bg-white text-slate-900 border-slate-200/80 shadow-2xs hover:shadow-md hover:border-teal-300 hover:-translate-y-0.5 relative"
         >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
-              Household Registry [{pendingHnrCount}]
-            </span>
-            <div className="p-2 rounded-xl transition-colors bg-teal-50 text-teal-600">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Household Registry [{pendingHnrCount}]
+              </span>
+              {hasNewHouseholds && <NewIndicator />}
+            </div>
+            <div className="p-2 rounded-xl transition-colors bg-teal-50 text-teal-600 shrink-0">
               <Home className="w-5 h-5" />
             </div>
           </div>
@@ -283,17 +443,20 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
         <button
           type="button"
           onClick={() => handleTabSelect('blotter', true)}
-          className={`w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+          className={`w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 relative ${
             activeTab === 'blotter'
               ? 'bg-purple-600 text-white border-purple-600 shadow-md ring-2 ring-purple-500 ring-offset-2 -translate-y-0.5'
               : 'bg-white text-slate-900 border-slate-200/80 shadow-2xs hover:shadow-md hover:border-purple-300 hover:-translate-y-0.5'
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'blotter' ? 'text-purple-100' : 'text-slate-500'}`}>
-              Blotter Cases
-            </span>
-            <div className={`p-2 rounded-xl transition-colors ${activeTab === 'blotter' ? 'bg-white/20 text-white' : 'bg-purple-50 text-purple-600'}`}>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'blotter' ? 'text-purple-100' : 'text-slate-500'}`}>
+                Blotter Cases
+              </span>
+              {hasNewBlotters && <NewIndicator isInverse={activeTab === 'blotter'} />}
+            </div>
+            <div className={`p-2 rounded-xl transition-colors shrink-0 ${activeTab === 'blotter' ? 'bg-white/20 text-white' : 'bg-purple-50 text-purple-600'}`}>
               <FileSpreadsheet className="w-5 h-5" />
             </div>
           </div>
@@ -305,19 +468,20 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
         <button
           type="button"
           onClick={() => handleTabSelect('announcements', true)}
-          className={`w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+          className={`w-full text-left p-5 rounded-2xl border transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 relative ${
             activeTab === 'announcements'
               ? 'bg-emerald-600 text-white border-emerald-600 shadow-md ring-2 ring-emerald-500 ring-offset-2 -translate-y-0.5'
               : 'bg-white text-slate-900 border-slate-200/80 shadow-2xs hover:shadow-md hover:border-emerald-300 hover:-translate-y-0.5'
           }`}
         >
-          <div>
-            <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'announcements' ? 'text-emerald-100' : 'text-slate-500'}`}>
-              Announcements
-            </span>
-          </div>
-          <div className="mt-2">
-            <div className={`p-2 rounded-xl inline-block transition-colors ${activeTab === 'announcements' ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-600'}`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'announcements' ? 'text-emerald-100' : 'text-slate-500'}`}>
+                Announcements
+              </span>
+              {hasNewAnnouncements && <NewIndicator isInverse={activeTab === 'announcements'} />}
+            </div>
+            <div className={`p-2 rounded-xl transition-colors shrink-0 ${activeTab === 'announcements' ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-600'}`}>
               <Megaphone className="w-5 h-5" />
             </div>
           </div>
@@ -336,10 +500,13 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'registrations' ? 'text-amber-100' : 'text-slate-500'}`}>
-              Registrations
-            </span>
-            <div className={`p-2 rounded-xl transition-colors ${activeTab === 'registrations' ? 'bg-white/20 text-white' : 'bg-amber-50 text-amber-600'}`}>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`text-xs font-bold uppercase tracking-wider ${activeTab === 'registrations' ? 'text-amber-100' : 'text-slate-500'}`}>
+                Registrations
+              </span>
+              {hasNewRegistrations && <NewIndicator isInverse={activeTab === 'registrations'} />}
+            </div>
+            <div className={`p-2 rounded-xl transition-colors shrink-0 ${activeTab === 'registrations' ? 'bg-white/20 text-white' : 'bg-amber-50 text-amber-600'}`}>
               <Users className="w-5 h-5" />
             </div>
           </div>
@@ -357,70 +524,21 @@ export const SecretaryDashboardView: React.FC<SecretaryDashboardViewProps> = ({
         </button>
       </div>
 
-      {/* MAIN CONTENT WORKSPACE TABS */}
+      {/* MAIN CONTENT WORKSPACE */}
       <div ref={workspaceRef} className="bg-white p-4 sm:p-6 rounded-2xl border border-slate-200/80 shadow-2xs space-y-6">
-        {/* Navigation Tabs */}
+        {/* Workspace Header & Search Bar (Replaced horizontal tab strip) */}
         <div className="flex items-center justify-between border-b border-slate-200 pb-4 gap-4 flex-wrap">
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl overflow-x-auto scrollbar-none max-w-full">
-            <button
-              type="button"
-              onClick={() => handleTabSelect('certificates')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold whitespace-nowrap transition-all ${
-                activeTab === 'certificates'
-                  ? 'bg-white text-blue-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              📄 Pending Certificates ({pendingCertsCount})
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleTabSelect('registrations')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold whitespace-nowrap transition-all ${
-                activeTab === 'registrations'
-                  ? 'bg-white text-blue-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              👥 Registration Requests ({registrations.length})
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleTabSelect('reports')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold whitespace-nowrap transition-all ${
-                activeTab === 'reports'
-                  ? 'bg-white text-blue-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              🚨 Reports ({reports.length})
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleTabSelect('announcements')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold whitespace-nowrap transition-all ${
-                activeTab === 'announcements'
-                  ? 'bg-white text-blue-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              📢 Announcements ({announcements.length})
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleTabSelect('blotter')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold whitespace-nowrap transition-all ${
-                activeTab === 'blotter'
-                  ? 'bg-white text-blue-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              ⚖️ Blotter ({blotters.length})
-            </button>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+              Active Module:
+            </span>
+            <span className="text-xs font-extrabold uppercase px-2.5 py-1 bg-slate-100 text-slate-800 rounded-lg">
+              {activeTab === 'certificates' && '📄 Pending Certificates'}
+              {activeTab === 'registrations' && '👥 Registration Requests'}
+              {activeTab === 'reports' && '🚨 Incident Reports'}
+              {activeTab === 'announcements' && '📢 Announcements'}
+              {activeTab === 'blotter' && '⚖️ Blotter Records'}
+            </span>
           </div>
 
           {/* Search Input */}
