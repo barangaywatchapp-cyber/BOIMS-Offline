@@ -27,6 +27,7 @@ import { BlotterCase, BlotterStatus, HearingRecord, User } from '../types';
 import { filterBlottersByAccess } from '../utils/jurisdictionUtils';
 import { isResidentMode } from '../utils/permissions';
 import { adminService } from './adminService';
+import { isAppOnline } from '../offline/networkManager';
 
 const BLOTTER_COLLECTION = 'blotterCases';
 const LOCAL_STORAGE_KEY = 'boims_offline_blotters_v1';
@@ -257,6 +258,12 @@ class BlotterService {
         newValues: { incidentType: newCase.incidentType, status: newCase.status, incidentLocation: newCase.incidentLocation },
       })
       .catch((err) => console.warn('[BlotterService] Audit log error:', err));
+
+    // If offline, immediately enqueue into SyncService and return newCase without network wait
+    if (!isAppOnline()) {
+      syncService.enqueue('create', BLOTTER_COLLECTION, caseId, newCase);
+      return newCase;
+    }
 
     // Attempt Firestore operation
     try {

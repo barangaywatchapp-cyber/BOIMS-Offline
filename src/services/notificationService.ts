@@ -437,6 +437,12 @@ class NotificationService {
       return newNotif;
     }
 
+    // When offline, immediately enqueue notification mutation into SyncService without waiting for Firestore
+    if (!isAppOnline()) {
+      syncService.enqueue('create', COLLECTION_NAME, id, newNotif);
+      return newNotif;
+    }
+
     try {
       const docRef = doc(db, COLLECTION_NAME, id);
       await setDoc(docRef, newNotif);

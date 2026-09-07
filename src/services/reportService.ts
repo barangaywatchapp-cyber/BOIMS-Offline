@@ -575,7 +575,7 @@ export class ReportService {
     // Ensure local store has latest queued mutations hydrated
     localReportsStore = applyQueuedReportMutations(localReportsStore);
 
-    if (!auth.currentUser) {
+    if (!isAppOnline() || !auth.currentUser) {
       const found = localReportsStore.find(
         (r) => (r.reportId === reportId || r.reportNumber === reportId) && !r.isDeleted
       );
