@@ -12,6 +12,7 @@
 
 import React, { useState } from 'react';
 import { useOffline } from '../contexts/OfflineContext';
+import { useAuth } from '../contexts/AuthContext';
 import { syncService } from '../services/SyncService';
 import { SyncQueueItem } from '../types';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/foundation/Card';
@@ -27,6 +28,7 @@ import {
   Database,
   CheckCircle2,
   AlertTriangle,
+  AlertOctagon,
   Clock,
   Eye,
   Layers,
@@ -36,20 +38,49 @@ import {
   ShieldCheck,
   UserCheck,
   Play,
+  RotateCcw,
 } from 'lucide-react';
 import { offlineStorage } from '../offline/storage';
-import { OfflineSessionRecord } from '../offline/types';
+import { OfflineSessionRecord, DeadLetterItem } from '../offline/types';
 import { runPhase3TestSuite, Phase3TestSuiteSummary } from '../offline/phase3Tests';
 
 export const OfflineSyncPage: React.FC = () => {
-  const { isOnline, pendingCount, failedCount, queue, isSyncing, triggerSync, clearQueue, removeItem } =
-    useOffline();
+  const {
+    isOnline,
+    pendingCount,
+    failedCount,
+    queue,
+    dlqItems,
+    dlqStats,
+    dlqCount,
+    isSyncing,
+    triggerSync,
+    clearQueue,
+    removeItem,
+    retryDLQItem,
+    deleteDLQItem,
+    purgeDLQItem,
+    clearDLQ,
+    refreshDLQ,
+  } = useOffline();
+  const { user } = useAuth();
 
   const [simulatedOffline, setSimulatedOffline] = useState<boolean>(false);
-  const [selectedItem, setSelectedItem] = useState<SyncQueueItem | null>(null);
+  const [selectedModalItem, setSelectedModalItem] = useState<{
+    id: string;
+    title: string;
+    operation: string;
+    collection: string;
+    recordId: string;
+    payload: any;
+    error?: string;
+    failedAt?: string;
+    reason?: string;
+  } | null>(null);
   const [showPayloadModal, setShowPayloadModal] = useState<boolean>(false);
   const [conflictStrategy, setConflictStrategy] = useState<'clientWins' | 'serverWins' | 'manual'>('clientWins');
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [retryingDLQId, setRetryingDLQId] = useState<string | null>(null);
   const [offlineSession, setOfflineSession] = useState<OfflineSessionRecord | null>(null);
   const [loadingSession, setLoadingSession] = useState<boolean>(false);
   const [phase3TestReport, setPhase3TestReport] = useState<Phase3TestSuiteSummary | null>(null);
@@ -111,6 +142,42 @@ export const OfflineSyncPage: React.FC = () => {
     }
   };
 
+  const handleRetryDLQSingle = async (dlqId: string) => {
+    if (!effectiveOnlineStatus) {
+      alert('Network is offline. Re-connect to retry quarantined items.');
+      return;
+    }
+    setRetryingDLQId(dlqId);
+    try {
+      const success = await retryDLQItem(dlqId, user);
+      if (success) {
+        alert('Quarantined item restored to active queue for synchronization replay.');
+      } else {
+        alert('Failed to retry quarantined item. Verify permissions or error diagnostics.');
+      }
+    } catch (err: any) {
+      alert(`Error retrying DLQ item: ${err?.message || err}`);
+    } finally {
+      setRetryingDLQId(null);
+    }
+  };
+
+  const handlePurgeDLQItem = async (dlqId: string) => {
+    if (window.confirm('Permanently purge this item from Dead Letter Queue? This action cannot be undone.')) {
+      if (purgeDLQItem) {
+        await purgeDLQItem(dlqId);
+      } else {
+        await deleteDLQItem(dlqId);
+      }
+    }
+  };
+
+  const handleClearAllDLQ = async () => {
+    if (window.confirm('Permanently clear all quarantined items from Dead Letter Queue?')) {
+      await clearDLQ();
+    }
+  };
+
   const handleExportQueueJSON = () => {
     const jsonStr = syncService.exportQueueJSON();
     const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -138,7 +205,7 @@ export const OfflineSyncPage: React.FC = () => {
     }
   };
 
-  const getOperationBadge = (op: SyncQueueItem['operationType']) => {
+  const getOperationBadge = (op: string) => {
     switch (op) {
       case 'create':
         return <Badge variant="success" className="font-mono text-[10px] uppercase">CREATE</Badge>;
@@ -146,6 +213,25 @@ export const OfflineSyncPage: React.FC = () => {
         return <Badge variant="info" className="font-mono text-[10px] uppercase">UPDATE</Badge>;
       case 'delete':
         return <Badge variant="danger" className="font-mono text-[10px] uppercase">DELETE</Badge>;
+      default:
+        return <Badge variant="secondary" className="font-mono text-[10px] uppercase">{op}</Badge>;
+    }
+  };
+
+  const getFailureReasonBadge = (reason: string) => {
+    switch (reason) {
+      case 'security_rejection':
+      case 'permission_denied':
+        return <Badge variant="danger" className="font-mono text-[10px]">AUTH / RULES DENIED</Badge>;
+      case 'max_retries_exceeded':
+        return <Badge variant="warning" className="font-mono text-[10px]">MAX RETRIES</Badge>;
+      case 'conflict_remote_newer':
+      case 'conflict_remote_deleted':
+        return <Badge variant="warning" className="font-mono text-[10px]">VERSION CONFLICT</Badge>;
+      case 'permanent_error':
+        return <Badge variant="danger" className="font-mono text-[10px]">PERMANENT ERROR</Badge>;
+      default:
+        return <Badge variant="secondary" className="font-mono text-[10px]">{reason}</Badge>;
     }
   };
 
@@ -190,7 +276,7 @@ export const OfflineSyncPage: React.FC = () => {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <Card className="border-l-4 border-l-blue-600">
           <CardContent className="p-4">
             <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Network Status</p>
@@ -222,11 +308,25 @@ export const OfflineSyncPage: React.FC = () => {
           </CardContent>
         </Card>
 
-        <Card className="border-l-4 border-l-emerald-600">
+        <Card className={`border-l-4 ${dlqCount > 0 ? 'border-l-rose-600 bg-rose-50/30' : 'border-l-slate-400'}`}>
+          <CardContent className="p-4">
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Dead Letter Queue</p>
+            <div className="flex items-center justify-between mt-1">
+              <p className={`text-2xl font-black ${dlqCount > 0 ? 'text-rose-600' : 'text-slate-600'}`}>
+                {dlqCount}
+              </p>
+              {dlqCount > 0 && (
+                <Badge variant="danger" className="text-[10px] font-mono">QUARANTINED</Badge>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-l-4 border-l-emerald-600 col-span-2 lg:col-span-1">
           <CardContent className="p-4">
             <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Storage & Cache Engine</p>
-            <p className="text-xl font-black text-slate-800 mt-1 flex items-center gap-1">
-              <HardDrive className="w-5 h-5 text-slate-500" /> LocalStorage / PWA
+            <p className="text-sm font-black text-slate-800 mt-1 flex items-center gap-1">
+              <HardDrive className="w-4 h-4 text-slate-500 shrink-0" /> IndexedDB (Canonical)
             </p>
           </CardContent>
         </Card>
@@ -282,11 +382,23 @@ export const OfflineSyncPage: React.FC = () => {
         <CardContent className="p-0">
           {queue.length === 0 ? (
             <div className="p-12 text-center text-slate-500">
-              <CheckCircle2 className="w-12 h-12 text-emerald-400 mx-auto mb-2" />
-              <p className="font-bold text-slate-800 text-base">Offline Sync Queue is Empty!</p>
-              <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
-                All field responder logs, incident reports, blotter updates, and certificate requests are fully synchronized with Firestore.
-              </p>
+              {dlqCount > 0 ? (
+                <div>
+                  <AlertTriangle className="w-12 h-12 text-amber-500 mx-auto mb-2" />
+                  <p className="font-bold text-slate-800 text-base">Active Mutation Queue is Idle</p>
+                  <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+                    There are no active mutations pending or syncing. However, <strong className="text-rose-600 font-bold">{dlqCount} quarantined mutation(s)</strong> require review in the Dead Letter Queue below.
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <CheckCircle2 className="w-12 h-12 text-emerald-400 mx-auto mb-2" />
+                  <p className="font-bold text-slate-800 text-base">Offline Sync Queue is Empty!</p>
+                  <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                    All field responder logs, incident reports, blotter updates, and certificate requests are fully synchronized with Firestore.
+                  </p>
+                </div>
+              )}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -333,7 +445,15 @@ export const OfflineSyncPage: React.FC = () => {
                             variant="secondary"
                             size="sm"
                             onClick={() => {
-                              setSelectedItem(item);
+                              setSelectedModalItem({
+                                id: item.queueId,
+                                title: 'Active Mutation Payload Inspector',
+                                operation: item.operationType,
+                                collection: item.collectionName,
+                                recordId: item.recordId,
+                                payload: item.payload,
+                                error: item.errorMessage,
+                              });
                               setShowPayloadModal(true);
                             }}
                             className="text-xs flex items-center gap-1"
@@ -357,6 +477,163 @@ export const OfflineSyncPage: React.FC = () => {
                             onClick={() => removeItem(item.queueId)}
                             className="text-xs p-1.5"
                             title="Remove from queue"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Dead Letter Queue (DLQ) Quarantine Inspector */}
+      <Card className="border-t-4 border-t-rose-600">
+        <CardHeader className="border-b border-slate-100 pb-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-rose-100 flex items-center justify-center shrink-0">
+                <AlertOctagon className="w-5 h-5 text-rose-600" />
+              </div>
+              <div>
+                <CardTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <span>Dead Letter Queue (DLQ) Quarantine Inspector</span>
+                  <Badge variant={dlqCount > 0 ? 'danger' : 'secondary'} className="font-mono text-xs">
+                    {dlqCount} {dlqCount === 1 ? 'record' : 'records'}
+                  </Badge>
+                </CardTitle>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Quarantined mutations rejected by Firestore security rules, validation limits, or unrecoverable version collisions.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-end sm:self-auto">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={refreshDLQ}
+                className="text-xs flex items-center gap-1"
+                title="Refresh Dead Letter Queue"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Refresh DLQ
+              </Button>
+              {dlqCount > 0 && (
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={handleClearAllDLQ}
+                  className="text-xs flex items-center gap-1"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> Clear All DLQ
+                </Button>
+              )}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {dlqItems.length === 0 ? (
+            <div className="p-10 text-center text-slate-500">
+              <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto mb-2" />
+              <p className="font-bold text-slate-800 text-base">Dead Letter Queue is Clean</p>
+              <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                No mutations have been quarantined due to security rejections, validation failures, or unrecoverable conflicts.
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-rose-50/60 border-b border-rose-100 text-[11px] font-bold text-rose-900 uppercase tracking-wider">
+                    <th className="py-3 px-4">DLQ ID & Quarantined At</th>
+                    <th className="py-3 px-4">Operation</th>
+                    <th className="py-3 px-4">Collection & Target ID</th>
+                    <th className="py-3 px-4">Quarantine Diagnostics</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-sm">
+                  {dlqItems.map((item) => (
+                    <tr key={item.dlqId} className="hover:bg-rose-50/30 transition-colors">
+                      <td className="py-3.5 px-4 font-mono text-xs">
+                        <div className="font-bold text-rose-700 flex items-center gap-1">
+                          <AlertOctagon className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                          <span>{item.dlqId}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5">
+                          <Clock className="w-3 h-3 text-slate-400" />
+                          {new Date(item.movedToDLQAt).toLocaleString()}
+                        </div>
+                        {item.originalQueueId && (
+                          <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                            Orig Queue ID: {item.originalQueueId}
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="py-3.5 px-4">
+                        {getOperationBadge(item.operation)}
+                      </td>
+
+                      <td className="py-3.5 px-4 text-xs font-mono text-slate-800">
+                        <span className="font-bold text-slate-900">{item.collectionName}</span> / {item.recordId}
+                      </td>
+
+                      <td className="py-3.5 px-4 text-xs max-w-sm">
+                        <div className="flex items-center gap-2 mb-1">
+                          {getFailureReasonBadge(item.reason)}
+                          <span className="text-slate-400 font-mono text-[10px]">({item.retryCount} attempts)</span>
+                        </div>
+                        <div className="text-[11px] text-rose-700 font-mono bg-rose-50 p-1.5 rounded border border-rose-200/60 break-words">
+                          {item.lastError || item.lastErrorCode || 'Fatal Error'}
+                        </div>
+                      </td>
+
+                      <td className="py-3.5 px-4 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => {
+                              setSelectedModalItem({
+                                id: item.dlqId,
+                                title: 'Quarantined DLQ Mutation Payload',
+                                operation: item.operation,
+                                collection: item.collectionName,
+                                recordId: item.recordId,
+                                payload: item.payload,
+                                error: item.lastError || item.lastErrorCode,
+                                failedAt: item.movedToDLQAt,
+                                reason: item.reason,
+                              });
+                              setShowPayloadModal(true);
+                            }}
+                            className="text-xs flex items-center gap-1"
+                          >
+                            <Eye className="w-3.5 h-3.5" /> Payload
+                          </Button>
+
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={retryingDLQId === item.dlqId || !effectiveOnlineStatus}
+                            onClick={() => handleRetryDLQSingle(item.dlqId)}
+                            className="text-xs flex items-center gap-1 border-rose-200 text-rose-700 hover:bg-rose-50"
+                            title="Restore to active queue and retry synchronization"
+                          >
+                            <RotateCcw className={`w-3.5 h-3.5 ${retryingDLQId === item.dlqId ? 'animate-spin' : ''}`} /> Replay
+                          </Button>
+
+                          <Button
+                            variant="danger"
+                            size="sm"
+                            onClick={() => handlePurgeDLQItem(item.dlqId)}
+                            className="text-xs p-1.5"
+                            title="Permanently purge from DLQ"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </Button>
@@ -526,13 +803,13 @@ export const OfflineSyncPage: React.FC = () => {
       </Card>
 
       {/* Payload Inspector Modal */}
-      {showPayloadModal && selectedItem && (
+      {showPayloadModal && selectedModalItem && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl p-6 space-y-4">
             <div className="flex justify-between items-center border-b border-slate-100 pb-3">
               <div>
-                <span className="font-mono text-xs font-bold text-blue-600">{selectedItem.queueId}</span>
-                <h3 className="font-bold text-lg text-slate-900">Mutation Payload Inspector</h3>
+                <span className="font-mono text-xs font-bold text-blue-600">{selectedModalItem.id}</span>
+                <h3 className="font-bold text-lg text-slate-900">{selectedModalItem.title}</h3>
               </div>
               <button onClick={() => setShowPayloadModal(false)} className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
             </div>
@@ -540,18 +817,28 @@ export const OfflineSyncPage: React.FC = () => {
             <div className="grid grid-cols-2 gap-2 text-xs bg-slate-50 p-3 rounded-xl border border-slate-200">
               <div>
                 <p className="text-slate-400 uppercase font-bold">Operation</p>
-                <div className="mt-0.5">{getOperationBadge(selectedItem.operationType)}</div>
+                <div className="mt-0.5">{getOperationBadge(selectedModalItem.operation)}</div>
               </div>
               <div>
                 <p className="text-slate-400 uppercase font-bold">Collection / Target</p>
-                <p className="font-mono font-bold text-slate-900 mt-0.5">{selectedItem.collectionName} / {selectedItem.recordId}</p>
+                <p className="font-mono font-bold text-slate-900 mt-0.5">{selectedModalItem.collection} / {selectedModalItem.recordId}</p>
               </div>
             </div>
+
+            {selectedModalItem.error && (
+              <div className="bg-rose-50 border border-rose-200 p-3 rounded-xl text-xs">
+                <span className="font-bold text-rose-800 uppercase tracking-wider text-[10px]">Quarantine Error Diagnostic</span>
+                <p className="font-mono text-rose-700 mt-1">{selectedModalItem.error}</p>
+                {selectedModalItem.reason && (
+                  <p className="text-slate-500 text-[11px] mt-1">Reason: <span className="font-mono font-bold">{selectedModalItem.reason}</span></p>
+                )}
+              </div>
+            )}
 
             <div>
               <h4 className="font-bold text-xs uppercase text-slate-500 mb-1">Payload JSON Data</h4>
               <pre className="bg-slate-900 text-emerald-400 p-4 rounded-xl font-mono text-xs overflow-x-auto max-h-60">
-                {JSON.stringify(selectedItem.payload, null, 2)}
+                {JSON.stringify(selectedModalItem.payload, null, 2)}
               </pre>
             </div>
 

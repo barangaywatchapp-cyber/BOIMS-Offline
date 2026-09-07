@@ -14,7 +14,8 @@
  */
 
 import { SyncQueueItem, User } from '../types';
-import { db } from '../firebase/config';
+import { db, auth } from '../firebase/config';
+import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, setDoc, deleteDoc, arrayUnion } from 'firebase/firestore';
 import { storageService } from './storageService';
 import { offlineStorage } from '../offline/storage';
@@ -49,10 +50,25 @@ class SyncService {
     this.init();
 
     if (typeof window !== 'undefined') {
-      window.addEventListener('online', () => {
+      window.addEventListener('online', async () => {
         console.log('[SyncService] Network status: Online. Auto-triggering Sync Queue processing...');
+        // Await Firebase Auth readiness to prevent unauthenticated replay race
+        if (auth && typeof auth.authStateReady === 'function') {
+          try {
+            await auth.authStateReady();
+          } catch (_) {}
+        }
         this.processQueue();
       });
+
+      // Synchronize queue replay with Firebase Auth readiness
+      try {
+        onAuthStateChanged(auth, (firebaseUser) => {
+          if (firebaseUser && typeof navigator !== 'undefined' && navigator.onLine) {
+            this.processQueue();
+          }
+        });
+      } catch (_) {}
     }
 
     // Subscribe to OfflineMutationQueue to keep memory snapshot synchronized
@@ -246,6 +262,27 @@ class SyncService {
       return { processed: 0, failed: 0 };
     }
 
+    // Ensure Firebase Auth is ready before processing queue to prevent premature unauthenticated rejection
+    if (auth) {
+      if (typeof auth.authStateReady === 'function') {
+        try {
+          await auth.authStateReady();
+        } catch (_) {}
+      }
+      if (auth.currentUser) {
+        try {
+          await auth.currentUser.getIdToken(false);
+        } catch (_) {}
+      } else {
+        // If auth.currentUser is not yet populated, check whether an active offline session exists
+        const session = await offlineStorage.getSession();
+        if (session && session.sessionState !== 'revoked') {
+          console.warn('[SyncService] Replay deferred: Firebase Auth session is restoring...');
+          return { processed: 0, failed: 0 };
+        }
+      }
+    }
+
     // Phase 8: Acquire exclusive cross-tab replay lease
     const acquired = await coordinationService.acquireLease();
     if (!acquired) {
@@ -335,64 +372,69 @@ class SyncService {
           const normalizedCollection = normalizeCollectionName(item.collectionName);
           const docRef = doc(db, normalizedCollection, item.recordId);
 
-          // Phase 7: Safe Pre-Replay Remote Inspection & Conflict Detection
-          let remoteExists = false;
-          let remoteData: any = null;
-          try {
-            const remoteSnap = await getDoc(docRef);
-            remoteExists = remoteSnap && typeof remoteSnap.exists === 'function' ? remoteSnap.exists() : false;
-            remoteData = remoteExists && typeof remoteSnap.data === 'function' ? remoteSnap.data() : null;
-          } catch (inspectErr: any) {
-            // Re-throw inspection errors to let permanent/transient error handling decide
-            throw inspectErr;
-          }
-
-          const conflictResult = detectMutationConflict(item, remoteData, remoteExists);
-          if (conflictResult.hasConflict) {
-            console.warn(
-              `[SyncService] Conflict detected (${conflictResult.reason}) for item ${item.queueId} on ${normalizedCollection}/${item.recordId}. Moving to DLQ:`,
-              conflictResult.errorMessage
-            );
-            const verifyBeforeConflictDLQ = await coordinationService.verifyOwnership();
-            if (!verifyBeforeConflictDLQ) {
-              console.warn('[SyncService] Aborting conflict DLQ quarantine: replay ownership lost.');
-              break;
-            }
-            await offlineStorage.moveToDLQ(
-              item,
-              conflictResult.reason || 'permanent_error',
-              {
-                code: conflictResult.reason,
-                message: conflictResult.errorMessage,
-                conflictDetails: {
-                  remoteExists: conflictResult.remoteExists,
-                  remoteUpdatedAt: conflictResult.remoteUpdatedAt,
-                  remoteIsDeleted: conflictResult.remoteIsDeleted,
-                  detectedAt: new Date().toISOString(),
-                  reason: conflictResult.reason || 'conflict',
-                },
-              }
-            );
-            failed++;
-            continue;
-          }
-
           if (item.operation === 'create') {
+            // Defect #1 Fix: For CREATE mutations, do NOT perform a pre-replay remote getDoc()
+            // inspection which fails security rules for uncreated resident documents.
+            // Proceed directly to Firestore create/write operation using existing prepared payload.
             await setDoc(
               docRef,
               { ...preparedPayload, updatedAt: new Date().toISOString() },
               { merge: true }
             );
-          } else if (item.operation === 'update') {
-            const { timelineEvent, ...otherUpdates } = preparedPayload || {};
-            const updatePayload: any = { ...otherUpdates, updatedAt: new Date().toISOString() };
-            if (timelineEvent && timelineEvent.eventId) {
-              updatePayload.timeline = arrayUnion(timelineEvent);
+          } else {
+            // Phase 7: Safe Pre-Replay Remote Inspection & Conflict Detection (UPDATE / DELETE only)
+            let remoteExists = false;
+            let remoteData: any = null;
+            try {
+              const remoteSnap = await getDoc(docRef);
+              remoteExists = remoteSnap && typeof remoteSnap.exists === 'function' ? remoteSnap.exists() : false;
+              remoteData = remoteExists && typeof remoteSnap.data === 'function' ? remoteSnap.data() : null;
+            } catch (inspectErr: any) {
+              // Re-throw inspection errors to let permanent/transient error handling decide
+              throw inspectErr;
             }
-            await setDoc(docRef, updatePayload, { merge: true });
-          } else if (item.operation === 'delete') {
-            if (remoteExists && !remoteData?.isDeleted) {
-              await deleteDoc(docRef);
+
+            const conflictResult = detectMutationConflict(item, remoteData, remoteExists);
+            if (conflictResult.hasConflict) {
+              console.warn(
+                `[SyncService] Conflict detected (${conflictResult.reason}) for item ${item.queueId} on ${normalizedCollection}/${item.recordId}. Moving to DLQ:`,
+                conflictResult.errorMessage
+              );
+              const verifyBeforeConflictDLQ = await coordinationService.verifyOwnership();
+              if (!verifyBeforeConflictDLQ) {
+                console.warn('[SyncService] Aborting conflict DLQ quarantine: replay ownership lost.');
+                break;
+              }
+              await offlineStorage.moveToDLQ(
+                item,
+                conflictResult.reason || 'permanent_error',
+                {
+                  code: conflictResult.reason,
+                  message: conflictResult.errorMessage,
+                  conflictDetails: {
+                    remoteExists: conflictResult.remoteExists,
+                    remoteUpdatedAt: conflictResult.remoteUpdatedAt,
+                    remoteIsDeleted: conflictResult.remoteIsDeleted,
+                    detectedAt: new Date().toISOString(),
+                    reason: conflictResult.reason || 'conflict',
+                  },
+                }
+              );
+              failed++;
+              continue;
+            }
+
+            if (item.operation === 'update') {
+              const { timelineEvent, ...otherUpdates } = preparedPayload || {};
+              const updatePayload: any = { ...otherUpdates, updatedAt: new Date().toISOString() };
+              if (timelineEvent && timelineEvent.eventId) {
+                updatePayload.timeline = arrayUnion(timelineEvent);
+              }
+              await setDoc(docRef, updatePayload, { merge: true });
+            } else if (item.operation === 'delete') {
+              if (remoteExists && !remoteData?.isDeleted) {
+                await deleteDoc(docRef);
+              }
             }
           }
 
@@ -517,63 +559,66 @@ class SyncService {
       const normalizedCollection = normalizeCollectionName(item.collectionName);
       const docRef = doc(db, normalizedCollection, item.recordId);
 
-      // Phase 7: Safe Pre-Replay Remote Inspection & Conflict Detection
-      let remoteExists = false;
-      let remoteData: any = null;
-      try {
-        const remoteSnap = await getDoc(docRef);
-        remoteExists = remoteSnap && typeof remoteSnap.exists === 'function' ? remoteSnap.exists() : false;
-        remoteData = remoteExists && typeof remoteSnap.data === 'function' ? remoteSnap.data() : null;
-      } catch (inspectErr: any) {
-        throw inspectErr;
-      }
-
-      const conflictResult = detectMutationConflict(item, remoteData, remoteExists);
-      if (conflictResult.hasConflict) {
-        console.warn(
-          `[SyncService] Conflict detected during retry (${conflictResult.reason}) for item ${item.queueId}. Quarantining to DLQ:`,
-          conflictResult.errorMessage
-        );
-        const verifyOwnershipBeforeDLQ = await coordinationService.verifyOwnership();
-        if (!verifyOwnershipBeforeDLQ) {
-          console.warn('[SyncService] Aborting retry DLQ move: ownership lost.');
-          return false;
-        }
-        await offlineStorage.moveToDLQ(
-          item,
-          conflictResult.reason || 'permanent_error',
-          {
-            code: conflictResult.reason,
-            message: conflictResult.errorMessage,
-            conflictDetails: {
-              remoteExists: conflictResult.remoteExists,
-              remoteUpdatedAt: conflictResult.remoteUpdatedAt,
-              remoteIsDeleted: conflictResult.remoteIsDeleted,
-              detectedAt: new Date().toISOString(),
-              reason: conflictResult.reason || 'conflict',
-            },
-          }
-        );
-        await this.refreshMemoryQueue();
-        return false;
-      }
-
       if (item.operation === 'create') {
+        // For CREATE, proceed directly to setDoc without pre-replay getDoc()
         await setDoc(
           docRef,
           { ...preparedPayload, updatedAt: new Date().toISOString() },
           { merge: true }
         );
-      } else if (item.operation === 'update') {
-        const { timelineEvent, ...otherUpdates } = preparedPayload || {};
-        const updatePayload: any = { ...otherUpdates, updatedAt: new Date().toISOString() };
-        if (timelineEvent && timelineEvent.eventId) {
-          updatePayload.timeline = arrayUnion(timelineEvent);
+      } else {
+        // Phase 7: Safe Pre-Replay Remote Inspection & Conflict Detection (UPDATE / DELETE only)
+        let remoteExists = false;
+        let remoteData: any = null;
+        try {
+          const remoteSnap = await getDoc(docRef);
+          remoteExists = remoteSnap && typeof remoteSnap.exists === 'function' ? remoteSnap.exists() : false;
+          remoteData = remoteExists && typeof remoteSnap.data === 'function' ? remoteSnap.data() : null;
+        } catch (inspectErr: any) {
+          throw inspectErr;
         }
-        await setDoc(docRef, updatePayload, { merge: true });
-      } else if (item.operation === 'delete') {
-        if (remoteExists && !remoteData?.isDeleted) {
-          await deleteDoc(docRef);
+
+        const conflictResult = detectMutationConflict(item, remoteData, remoteExists);
+        if (conflictResult.hasConflict) {
+          console.warn(
+            `[SyncService] Conflict detected during retry (${conflictResult.reason}) for item ${item.queueId}. Quarantining to DLQ:`,
+            conflictResult.errorMessage
+          );
+          const verifyOwnershipBeforeDLQ = await coordinationService.verifyOwnership();
+          if (!verifyOwnershipBeforeDLQ) {
+            console.warn('[SyncService] Aborting retry DLQ move: ownership lost.');
+            return false;
+          }
+          await offlineStorage.moveToDLQ(
+            item,
+            conflictResult.reason || 'permanent_error',
+            {
+              code: conflictResult.reason,
+              message: conflictResult.errorMessage,
+              conflictDetails: {
+                remoteExists: conflictResult.remoteExists,
+                remoteUpdatedAt: conflictResult.remoteUpdatedAt,
+                remoteIsDeleted: conflictResult.remoteIsDeleted,
+                detectedAt: new Date().toISOString(),
+                reason: conflictResult.reason || 'conflict',
+              },
+            }
+          );
+          await this.refreshMemoryQueue();
+          return false;
+        }
+
+        if (item.operation === 'update') {
+          const { timelineEvent, ...otherUpdates } = preparedPayload || {};
+          const updatePayload: any = { ...otherUpdates, updatedAt: new Date().toISOString() };
+          if (timelineEvent && timelineEvent.eventId) {
+            updatePayload.timeline = arrayUnion(timelineEvent);
+          }
+          await setDoc(docRef, updatePayload, { merge: true });
+        } else if (item.operation === 'delete') {
+          if (remoteExists && !remoteData?.isDeleted) {
+            await deleteDoc(docRef);
+          }
         }
       }
 

@@ -207,9 +207,9 @@ export const CreateReportPage: React.FC = () => {
             address: fullAddress,
           },
           imageUrls: finalImageUrls,
-          userId: isAnonymous ? 'anonymous-user' : user?.uid || 'guest-user',
+          userId: user?.uid || 'guest-user',
           userName: isAnonymous ? 'Anonymous Resident' : user?.fullName || 'Resident',
-          userEmail: isAnonymous ? 'anonymous@boims.gov.ph' : user?.email || '',
+          userEmail: isAnonymous ? '' : user?.email || '',
         },
         isOnline
       );

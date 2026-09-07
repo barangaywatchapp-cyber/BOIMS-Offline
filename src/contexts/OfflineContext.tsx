@@ -29,6 +29,7 @@ export interface OfflineContextType {
   removeItem: (queueId: string) => void;
   retryDLQItem: (dlqId: string, contextUser?: User | null) => Promise<boolean>;
   deleteDLQItem: (dlqId: string) => Promise<void>;
+  purgeDLQItem: (dlqId: string) => Promise<void>;
   clearDLQ: () => Promise<void>;
   refreshDLQ: () => Promise<void>;
 }
@@ -78,6 +79,7 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
         removeItem,
         retryDLQItem,
         deleteDLQItem,
+        purgeDLQItem: deleteDLQItem,
         clearDLQ,
         refreshDLQ,
       }}
