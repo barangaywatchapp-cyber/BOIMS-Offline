@@ -192,25 +192,35 @@ class BlotterService {
    */
   async createBlotter(
     data: Omit<BlotterCase, 'caseId' | 'caseNumber' | 'createdAt' | 'updatedAt' | 'isDeleted' | 'createdBy'>,
-    createdBy: string
+    createdBy: string,
+    caseIdOverride?: string
   ): Promise<BlotterCase> {
-    const existing = await this.getBlotters();
-    const year = new Date().getFullYear();
-    const prefix = `BLT-${year}-`;
-    
-    let maxSeq = 0;
-    existing.forEach((item) => {
-      if (item.caseNumber && item.caseNumber.startsWith(prefix)) {
-        const seqNum = parseInt(item.caseNumber.replace(prefix, ''), 10);
-        if (!isNaN(seqNum) && seqNum > maxSeq) {
-          maxSeq = seqNum;
-        }
-      }
-    });
+    let caseId: string;
+    let caseNumber: string;
 
-    const nextSeqStr = (maxSeq + 1).toString().padStart(4, '0');
-    const caseId = `${prefix}${nextSeqStr}`;
-    const caseNumber = caseId;
+    if (caseIdOverride && /^BLT-\d{4}-\d{5}$/.test(caseIdOverride)) {
+      caseId = caseIdOverride;
+      caseNumber = caseIdOverride;
+    } else {
+      const existing = await this.getBlotters();
+      const year = new Date().getFullYear();
+      const prefix = `BLT-${year}-`;
+      
+      let maxSeq = 0;
+      existing.forEach((item) => {
+        if (item.caseNumber && item.caseNumber.startsWith(prefix)) {
+          const seqNum = parseInt(item.caseNumber.replace(prefix, ''), 10);
+          if (!isNaN(seqNum) && seqNum > maxSeq) {
+            maxSeq = seqNum;
+          }
+        }
+      });
+
+      const nextSeqStr = (maxSeq + 1).toString().padStart(4, '0');
+      caseId = `${prefix}${nextSeqStr}`;
+      caseNumber = caseId;
+    }
+
     const now = new Date().toISOString();
 
     const newCase: BlotterCase = {
@@ -227,7 +237,12 @@ class BlotterService {
 
     // Update local cache immediately
     const cache = this.getLocalCache();
-    cache.unshift(newCase);
+    const existingIndex = cache.findIndex((item) => item.caseId === caseId);
+    if (existingIndex >= 0) {
+      cache[existingIndex] = newCase;
+    } else {
+      cache.unshift(newCase);
+    }
     this.setLocalCache(cache);
 
     // Audit trail logging (non-blocking)

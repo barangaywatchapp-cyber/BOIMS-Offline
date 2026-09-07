@@ -1265,31 +1265,44 @@ export class ReportService {
 
     let createdBlotterId: string | undefined;
 
-    // If neighborhood dispute and online, create or link a Blotter Case automatically.
-    // Offline escalation preserves report escalation; Blotter synchronization is reconciled upon reconnect.
-    if (isOnline && currentReport?.category === 'neighborhood_dispute') {
-      try {
-        const blotterCase = await blotterService.createBlotter(
-          {
-            complainantName: currentReport.isAnonymous ? 'Anonymous Resident' : currentReport.userName || 'Community Resident',
-            complainantContact: '',
-            complainantAddress: currentReport.location?.address || currentReport.purok || 'Barangay Central',
-            respondentName: 'To be determined (Mediation)',
-            respondentContact: '',
-            respondentAddress: currentReport.location?.address || currentReport.purok || 'Barangay Central',
-            incidentType: 'Neighborhood Dispute (Escalated)',
-            incidentDate: currentReport.createdAt || now,
-            incidentLocation: currentReport.location?.address || currentReport.purok || 'Barangay Central',
-            purok: currentReport.purok || 'Purok 1',
-            narrative: `[Escalated from Report #${currentReport.reportNumber} - ${currentReport.title}]\n\n${currentReport.description}\n\nEscalation Remarks: ${remarks}`,
-            assignedOfficerName: performer.fullName || 'Barangay Secretary',
-            status: 'open',
-          },
-          performer.uid
-        );
-        createdBlotterId = blotterCase.caseId;
-      } catch (blotterErr) {
-        console.warn('[ReportService] Auto-creation of blotter case on escalation failed:', blotterErr);
+    // If neighborhood dispute, create or link a Blotter Case automatically with a deterministic report-derived ID.
+    // Offline escalation preserves report escalation; Blotter synchronization is queued and reconciled upon reconnect.
+    if (currentReport?.category === 'neighborhood_dispute') {
+      const reportNum = currentReport.reportNumber || '';
+      let derivedBlotterCaseId: string | undefined;
+
+      // Validate reportNumber format before slicing
+      if (/^RPT-\d{4}-\d{5}$/.test(reportNum)) {
+        derivedBlotterCaseId = `BLT-${reportNum.slice(4)}`;
+      }
+
+      if (derivedBlotterCaseId) {
+        try {
+          const blotterCase = await blotterService.createBlotter(
+            {
+              complainantName: currentReport.isAnonymous ? 'Anonymous Resident' : currentReport.userName || 'Community Resident',
+              complainantContact: '',
+              complainantAddress: currentReport.location?.address || currentReport.purok || 'Barangay Central',
+              respondentName: 'To be determined (Mediation)',
+              respondentContact: '',
+              respondentAddress: currentReport.location?.address || currentReport.purok || 'Barangay Central',
+              incidentType: 'Neighborhood Dispute (Escalated)',
+              incidentDate: currentReport.createdAt || now,
+              incidentLocation: currentReport.location?.address || currentReport.purok || 'Barangay Central',
+              purok: currentReport.purok || 'Purok 1',
+              narrative: `[Escalated from Report #${currentReport.reportNumber} - ${currentReport.title}]\n\n${currentReport.description}\n\nEscalation Remarks: ${remarks}`,
+              assignedOfficerName: performer.fullName || 'Barangay Secretary',
+              status: 'open',
+            },
+            performer.uid,
+            derivedBlotterCaseId
+          );
+          createdBlotterId = blotterCase.caseId;
+        } catch (blotterErr) {
+          console.warn('[ReportService] Auto-creation of blotter case on escalation failed:', blotterErr);
+        }
+      } else {
+        console.warn('[ReportService] Skipped blotter derivation due to non-matching reportNumber format:', reportNum);
       }
     }
 

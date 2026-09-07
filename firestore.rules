@@ -570,17 +570,17 @@ service cloud.firestore {
           (request.resource.data.status == 'escalated' || !request.resource.data.diff(resource.data).affectedKeys().hasAny([
             'escalatedBy', 'escalatedByName', 'escalatedAt', 'escalationRemarks', 'blotterCaseId'
           ])) &&
-          // When blotterCaseId is attached, verify cross-document integrity against the pre-created blotter case
+          // When blotterCaseId is attached, enforce deterministic derivation from the immutable reportNumber
           (
             !('blotterCaseId' in request.resource.data) ||
             (
               request.resource.data.status == 'escalated' &&
               resource.data.category == 'neighborhood_dispute' &&
+              'reportNumber' in resource.data &&
+              resource.data.reportNumber is string &&
+              resource.data.reportNumber.matches('^RPT-[0-9]{4}-[0-9]{5}$') &&
               request.resource.data.blotterCaseId is string &&
-              request.resource.data.blotterCaseId.size() > 0 &&
-              exists(/databases/$(database)/documents/blotterCases/$(request.resource.data.blotterCaseId)) &&
-              get(/databases/$(database)/documents/blotterCases/$(request.resource.data.blotterCaseId)).data.createdBy == request.auth.uid &&
-              get(/databases/$(database)/documents/blotterCases/$(request.resource.data.blotterCaseId)).data.status == 'open'
+              request.resource.data.blotterCaseId == ('BLT-' + resource.data.reportNumber[4:])
             )
           ) &&
           (resource == null || !('timeline' in resource.data) || !('timeline' in request.resource.data) || request.resource.data.timeline.hasAll(resource.data.timeline)) &&
@@ -643,6 +643,7 @@ service cloud.firestore {
         request.resource.data.isDeleted == false &&
         request.resource.data.caseId == caseId &&
         request.resource.data.caseNumber == caseId &&
+        caseId.matches('^BLT-[0-9]{4}-[0-9]{5}$') &&
         // Strict guard against unprivileged Lupon/KP field tampering
         (!('hearings' in request.resource.data) || request.resource.data.hearings.size() == 0) &&
         (!('hearingSchedule' in request.resource.data) || request.resource.data.hearingSchedule == null) &&
