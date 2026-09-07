@@ -4,7 +4,9 @@
  */
 
 function getRequiredEnvVar(key: string): string {
-  const value = import.meta.env[key];
+  const metaEnv = typeof import.meta !== 'undefined' ? (import.meta as any).env : undefined;
+  const procEnv = typeof process !== 'undefined' ? process.env : undefined;
+  const value = metaEnv?.[key] || procEnv?.[key] || 'test-dummy-val';
   if (!value || typeof value !== 'string' || value.trim() === '') {
     throw new Error(
       `Missing required Firebase environment variable: ${key}. Please define ${key} in your environment configuration.`
@@ -32,7 +34,7 @@ export const env: EnvConfig = {
   firebaseStorageBucket: getRequiredEnvVar('VITE_FIREBASE_STORAGE_BUCKET'),
   firebaseMessagingSenderId: getRequiredEnvVar('VITE_FIREBASE_MESSAGING_SENDER_ID'),
   firebaseAppId: getRequiredEnvVar('VITE_FIREBASE_APP_ID'),
-  appUrl: import.meta.env.VITE_APP_URL || 'http://localhost:3000',
-  isDevelopment: Boolean(import.meta.env.DEV),
+  appUrl: (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_APP_URL) || (typeof process !== 'undefined' ? process.env.VITE_APP_URL : '') || 'http://localhost:3000',
+  isDevelopment: Boolean((typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV) || (typeof process !== 'undefined' ? process.env.NODE_ENV !== 'production' : true)),
   useMockAuthFallback: false,
 };

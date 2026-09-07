@@ -13,6 +13,9 @@
  * - Zero interference with Firebase Auth or session credentials.
  */
 
+import { db } from '../firebase/config';
+import { disableNetwork, enableNetwork } from 'firebase/firestore';
+
 const SIMULATED_OFFLINE_KEY = 'boims_simulated_offline';
 const NETWORK_CHANGE_EVENT = 'boims:network-status-changed';
 
@@ -27,10 +30,30 @@ type NetworkListener = (status: NetworkStatus) => void;
 class NetworkManager {
   private listeners: Set<NetworkListener> = new Set();
   private simulatedOffline: boolean = false;
+  private initPromise: Promise<void>;
 
   constructor() {
     this.simulatedOffline = this.readStoredSimulationState();
+    if (this.simulatedOffline && db) {
+      this.initPromise = disableNetwork(db)
+        .then(() => {
+          console.info('[NetworkManager] Startup: Firestore transport isolated via disableNetwork(db).');
+        })
+        .catch((err) => {
+          console.warn('[NetworkManager] Failed to disable network at startup:', err);
+        });
+    } else {
+      this.initPromise = Promise.resolve();
+    }
     this.setupEventListeners();
+  }
+
+  /**
+   * Startup readiness barrier. Ensures that any persisted simulated-offline
+   * transport state has finalized before realtime listeners attach.
+   */
+  public async ensureInitialized(): Promise<void> {
+    await this.initPromise;
   }
 
   private readStoredSimulationState(): boolean {
@@ -46,27 +69,39 @@ class NetworkManager {
     if (typeof window === 'undefined') return;
 
     // Physical browser online/offline events
-    window.addEventListener('online', () => this.handleNetworkEvent());
-    window.addEventListener('offline', () => this.handleNetworkEvent());
+    window.addEventListener('online', () => this.handleNetworkEvent('online'));
+    window.addEventListener('offline', () => this.handleNetworkEvent('offline'));
 
     // Cross-tab synchronization via localStorage
     window.addEventListener('storage', (e: StorageEvent) => {
       if (e.key === SIMULATED_OFFLINE_KEY) {
-        this.simulatedOffline = e.newValue === 'true';
-        this.notifyListeners();
+        const nextState = e.newValue === 'true';
+        if (nextState !== this.simulatedOffline) {
+          void this.setSimulatedOffline(nextState);
+        }
       }
     });
 
     // Same-tab custom event
     window.addEventListener(NETWORK_CHANGE_EVENT, (e: any) => {
       if (e.detail && typeof e.detail.isSimulatedOffline === 'boolean') {
-        this.simulatedOffline = e.detail.isSimulatedOffline;
-        this.notifyListeners();
+        const nextState = e.detail.isSimulatedOffline;
+        if (nextState !== this.simulatedOffline) {
+          void this.setSimulatedOffline(nextState);
+        }
       }
     });
   }
 
-  private handleNetworkEvent(): void {
+  private handleNetworkEvent(type: 'online' | 'offline'): void {
+    if (type === 'online') {
+      if (this.simulatedOffline && db) {
+        // Enforce isolation even if physical network returns
+        void disableNetwork(db).catch((err) => console.warn('[NetworkManager] disableNetwork error on online event:', err));
+      } else if (!this.simulatedOffline && db) {
+        void enableNetwork(db).catch((err) => console.warn('[NetworkManager] enableNetwork error on online event:', err));
+      }
+    }
     this.notifyListeners();
   }
 
@@ -120,9 +155,10 @@ class NetworkManager {
 
   /**
    * Sets the application-level simulated offline state.
-   * Persists to localStorage and notifies all components and services.
+   * Persists to localStorage, isolates or restores Firestore transport,
+   * and notifies all components and services.
    */
-  public setSimulatedOffline(simulated: boolean): void {
+  public async setSimulatedOffline(simulated: boolean): Promise<void> {
     this.simulatedOffline = simulated;
 
     if (typeof localStorage !== 'undefined') {
@@ -131,6 +167,19 @@ class NetworkManager {
       } catch (err) {
         console.warn('[NetworkManager] Failed to persist simulated offline state to localStorage:', err);
       }
+    }
+
+    // PRIMARY SIMULATION MECHANISM: Transport-level isolation via Firebase Firestore SDK
+    try {
+      if (simulated && db) {
+        await disableNetwork(db);
+        console.info('[NetworkManager] Firestore transport isolated: disableNetwork(db) complete.');
+      } else if (!simulated && db && this.getActualBrowserOnline()) {
+        await enableNetwork(db);
+        console.info('[NetworkManager] Firestore transport restored: enableNetwork(db) complete.');
+      }
+    } catch (netErr) {
+      console.warn('[NetworkManager] Error toggling Firestore network transport:', netErr);
     }
 
     if (typeof window !== 'undefined') {
@@ -152,7 +201,7 @@ class NetworkManager {
    */
   public toggleSimulatedOffline(): boolean {
     const nextState = !this.simulatedOffline;
-    this.setSimulatedOffline(nextState);
+    void this.setSimulatedOffline(nextState);
     return nextState;
   }
 

@@ -11,6 +11,7 @@ import { offlineStorage } from './storage';
 import { offlineRecovery } from './recovery';
 import { syncQueueMigration } from './syncMigration';
 import { OfflineQueueItem, OfflineStorageMetadata } from './types';
+import { networkManager } from './networkManager';
 
 export interface OfflineBootstrapResult {
   available: boolean;
@@ -22,6 +23,9 @@ export interface OfflineBootstrapResult {
 
 class OfflineBootstrap {
   async initialize(): Promise<OfflineBootstrapResult> {
+    // Ensure persisted simulated offline network state is established
+    await networkManager.ensureInitialized();
+
     const available = await offlineStorage.isAvailable();
 
     if (!available) {

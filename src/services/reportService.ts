@@ -38,7 +38,7 @@ import {
 } from '../utils/jurisdictionUtils';
 import { adminService } from './adminService';
 import { blotterService } from './blotterService';
-import { isAppOnline } from '../offline/networkManager';
+import { isAppOnline, networkManager } from '../offline/networkManager';
 import { notificationService } from './notificationService';
 
 const LOCAL_REPORTS_KEY = 'boims_local_reports_v1';
@@ -473,7 +473,9 @@ export class ReportService {
       handleSnapshot(lastRawReports, lastIsOnline);
     });
 
-    const startListener = () => {
+    const startListener = async () => {
+      if (isCancelled) return;
+      await networkManager.ensureInitialized();
       if (isCancelled) return;
       if (!auth.currentUser) {
         logDiagnostic('startListener invoked without auth.currentUser');
@@ -506,6 +508,9 @@ export class ReportService {
                 hasPendingWrites: snapshot.metadata.hasPendingWrites,
               });
 
+              // Defensive secondary safeguard: treat snapshot as online source only if not from cache and app is effectively online
+              const isEffectiveOnline = !snapshot.metadata.fromCache && isAppOnline();
+
               if (!snapshot.empty) {
                 const reports = snapshot.docs.map((docSnap) => {
                   const raw = docSnap.data() as Report;
@@ -515,9 +520,9 @@ export class ReportService {
                     reportNumber: raw.reportNumber || docSnap.id,
                   };
                 });
-                handleSnapshot(reports, true);
+                handleSnapshot(reports, isEffectiveOnline);
               } else {
-                handleSnapshot([], true);
+                handleSnapshot([], isEffectiveOnline);
               }
             },
             (err) => {
