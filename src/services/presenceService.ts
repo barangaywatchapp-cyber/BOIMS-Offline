@@ -7,6 +7,7 @@
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { UserPresence, PresenceStatus, PresenceHealth, UserRole } from '../types';
+import { isAppOnline } from '../offline/networkManager';
 
 export const OFFICIAL_ROLES: UserRole[] = [
   'purokOfficial',
@@ -79,7 +80,7 @@ export class PresenceService {
       return 'dead';
     }
 
-    const isBrowserOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+    const isBrowserOnline = isAppOnline();
     const now = Date.now();
     const lastHeartbeatMs = this.lastSuccessfulHeartbeat
       ? new Date(this.lastSuccessfulHeartbeat).getTime()
@@ -256,7 +257,7 @@ export class PresenceService {
         return;
       }
 
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      if (!isAppOnline()) {
         this.heartbeatStatus = 'paused';
         return;
       }

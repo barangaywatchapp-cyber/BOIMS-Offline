@@ -62,10 +62,13 @@ export const OfflineSyncPage: React.FC = () => {
     purgeDLQItem,
     clearDLQ,
     refreshDLQ,
+    isSimulatedOffline,
+    actualBrowserOnline,
+    setSimulatedOffline,
+    toggleSimulatedOffline,
   } = useOffline();
   const { user } = useAuth();
 
-  const [simulatedOffline, setSimulatedOffline] = useState<boolean>(false);
   const [selectedModalItem, setSelectedModalItem] = useState<{
     id: string;
     title: string;
@@ -113,7 +116,7 @@ export const OfflineSyncPage: React.FC = () => {
     }
   };
 
-  const effectiveOnlineStatus = isOnline && !simulatedOffline;
+  const effectiveOnlineStatus = isOnline;
 
   const handleManualSync = async () => {
     if (!effectiveOnlineStatus) {
@@ -253,13 +256,13 @@ export const OfflineSyncPage: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <Button
-            variant={simulatedOffline ? 'danger' : 'secondary'}
+            variant={isSimulatedOffline ? 'danger' : 'secondary'}
             size="sm"
-            onClick={() => setSimulatedOffline(!simulatedOffline)}
+            onClick={() => toggleSimulatedOffline()}
             className="flex items-center gap-2 font-bold"
           >
-            {simulatedOffline ? <WifiOff className="w-4 h-4 text-white" /> : <Wifi className="w-4 h-4 text-emerald-400" />}
-            {simulatedOffline ? 'Simulating Offline Mode' : 'Network Active'}
+            {isSimulatedOffline ? <WifiOff className="w-4 h-4 text-white animate-pulse" /> : <Wifi className="w-4 h-4 text-emerald-400" />}
+            {isSimulatedOffline ? 'Simulating Offline Mode' : 'Network Active'}
           </Button>
 
           <Button
@@ -275,13 +278,40 @@ export const OfflineSyncPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Simulated Offline Mode Banner */}
+      {isSimulatedOffline && (
+        <div className="bg-amber-500/10 border-2 border-amber-500/40 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-amber-900 shadow-sm">
+          <div className="flex items-center gap-3">
+            <WifiOff className="w-6 h-6 text-amber-600 shrink-0 animate-pulse" />
+            <div>
+              <p className="text-sm font-bold text-amber-900">Simulated Offline Mode Active (Application-Level Simulator)</p>
+              <p className="text-xs text-amber-800 mt-0.5">
+                All services, pages, and queue managers are operating in offline mode. All reports created will be persisted to IndexedDB (offlineQueue). Firestore background sync is paused until simulation is toggled off.
+              </p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => setSimulatedOffline(false)}
+            className="shrink-0 font-bold self-start sm:self-auto border-amber-300 bg-amber-100 hover:bg-amber-200 text-amber-900"
+          >
+            Disable Simulation
+          </Button>
+        </div>
+      )}
+
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <Card className="border-l-4 border-l-blue-600">
           <CardContent className="p-4">
             <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Network Status</p>
             <p className="text-xl font-black mt-1 flex items-center gap-1.5">
-              {effectiveOnlineStatus ? (
+              {isSimulatedOffline ? (
+                <span className="text-amber-600 flex items-center gap-1.5">
+                  <WifiOff className="w-5 h-5 text-amber-600 animate-pulse" /> Simulated Offline
+                </span>
+              ) : isOnline ? (
                 <span className="text-emerald-600 flex items-center gap-1.5">
                   <Wifi className="w-5 h-5 text-emerald-600" /> Connected
                 </span>

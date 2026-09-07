@@ -25,6 +25,7 @@ import { filterNotificationsByAccess } from '../utils/jurisdictionUtils';
 import { offlineStorage } from '../offline/storage';
 import { coordinationService } from '../offline/coordinationService';
 import { deduplicateNotifications } from '../offline/types';
+import { isAppOnline } from '../offline/networkManager';
 
 const COLLECTION_NAME = 'notifications';
 
@@ -466,7 +467,7 @@ class NotificationService {
    * Non-blocking, preserves Firestore notification regardless of network/FCM status
    */
   private async dispatchServerFcmPush(notification: Notification): Promise<void> {
-    if (typeof window === 'undefined' || !navigator.onLine) return;
+    if (typeof window === 'undefined' || !isAppOnline()) return;
 
     try {
       const idToken = await auth.currentUser?.getIdToken();

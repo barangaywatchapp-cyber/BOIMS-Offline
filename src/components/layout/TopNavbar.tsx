@@ -37,7 +37,7 @@ export interface TopNavbarProps {
 
 export const TopNavbar: React.FC<TopNavbarProps> = ({ onOpenMobileMenu }) => {
   const { user, role, isAuthInitialized, logout, updateDutyMode } = useAuth();
-  const { isOnline, pendingCount, isSyncing, triggerSync } = useOffline();
+  const { isOnline, isSimulatedOffline, pendingCount, isSyncing, triggerSync } = useOffline();
   const { showToast } = useToast();
   const navigate = useNavigate();
 
@@ -127,7 +127,11 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({ onOpenMobileMenu }) => {
 
       {/* Middle: Network Status Badge */}
       <div className="hidden lg:flex items-center gap-2">
-        {isOnline ? (
+        {isSimulatedOffline ? (
+          <Badge variant="warning" icon={<WifiOff className="w-3 h-3 text-amber-600 animate-pulse" />}>
+            Simulated Offline
+          </Badge>
+        ) : isOnline ? (
           <Badge variant="success" icon={<Wifi className="w-3 h-3 text-emerald-600" />}>
             System Online
           </Badge>

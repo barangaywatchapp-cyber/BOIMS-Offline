@@ -9,7 +9,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { WifiOff, RefreshCw, CheckCircle2, AlertCircle, AlertTriangle } from 'lucide-react';
 
 export const OfflineBanner: React.FC = () => {
-  const { isOnline, pendingCount, failedCount, dlqCount, isSyncing, triggerSync } = useOffline();
+  const { isOnline, isSimulatedOffline, pendingCount, failedCount, dlqCount, isSyncing, triggerSync } = useOffline();
   const { user, hasActiveDispatcher } = useAuth();
   const [hasDispatcherOnDuty, setHasDispatcherOnDuty] = useState<boolean>(true);
 
@@ -67,6 +67,13 @@ export const OfflineBanner: React.FC = () => {
             <AlertTriangle className="w-4 h-4 text-red-300 shrink-0 animate-pulse" />
             <span>
               <strong>🚨 NO ACTIVE DISPATCHER ON DUTY:</strong> No Dispatcher is currently on duty. Pending reports cannot be dispatched until an active Dispatcher becomes available.
+            </span>
+          </>
+        ) : isSimulatedOffline ? (
+          <>
+            <WifiOff className="w-4 h-4 text-amber-400 shrink-0 animate-pulse" />
+            <span>
+              <strong>Simulated Offline Mode:</strong> Operating in application-level offline simulation. Changes are queued locally and automatic sync is paused.
             </span>
           </>
         ) : !isOnline ? (

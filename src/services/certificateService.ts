@@ -28,6 +28,7 @@ import { offlineStorage } from '../offline/storage';
 import { syncService } from './SyncService';
 import { storageService } from './storageService';
 import { adminService } from './adminService';
+import { isAppOnline } from '../offline/networkManager';
 
 // In-memory cache for offline storage and instant UI updates
 let localCertificatesStore: CertificateRequest[] = [];
@@ -140,7 +141,7 @@ export class CertificateService {
     };
 
     try {
-      if (navigator.onLine) {
+      if (isAppOnline()) {
         const publicRef = doc(db, 'publicVerifications', token);
         await setDoc(publicRef, JSON.parse(JSON.stringify(publicPayload)), { merge: true });
       }
@@ -637,7 +638,7 @@ export class CertificateService {
       .catch((err) => console.warn('[CertificateService] Audit log error:', err));
 
     // Persist to Firestore (online) or Queue for Sync (offline)
-    if (navigator.onLine) {
+    if (isAppOnline()) {
       try {
         const docRef = doc(db, 'certificateRequests', certificateId);
         // Build payload strictly matching Firestore rules allow create specifications
@@ -815,7 +816,7 @@ export class CertificateService {
 
     // Update Firestore or Queue offline
     try {
-      if (navigator.onLine) {
+      if (isAppOnline()) {
         const docRef = doc(db, 'certificateRequests', certificateId);
         const cleanPayload = JSON.parse(JSON.stringify(updatedCert));
         await updateDoc(docRef, cleanPayload);
@@ -872,7 +873,7 @@ export class CertificateService {
     const payload = { isDeleted: true, deletedAt: now, deletedBy };
 
     try {
-      if (navigator.onLine) {
+      if (isAppOnline()) {
         const docRef = doc(db, 'certificateRequests', certificateId);
         await updateDoc(docRef, payload);
       } else {

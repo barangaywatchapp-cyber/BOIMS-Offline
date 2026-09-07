@@ -38,6 +38,7 @@ import {
 } from '../utils/jurisdictionUtils';
 import { adminService } from './adminService';
 import { blotterService } from './blotterService';
+import { isAppOnline } from '../offline/networkManager';
 import { notificationService } from './notificationService';
 
 const LOCAL_REPORTS_KEY = 'boims_local_reports_v1';
@@ -671,7 +672,7 @@ export class ReportService {
       | 'isDeleted'
       | 'timeline'
     >,
-    isOnline: boolean = true
+    isOnline: boolean = isAppOnline()
   ): Promise<Report> {
     const reportId = `rpt-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const reportNumber = this.generateReportNumber();
@@ -749,7 +750,7 @@ export class ReportService {
     newStatus: ReportStatus,
     remarks: string,
     performer: { uid: string; fullName: string; role: UserRole; dutyStatus?: DutyStatus; dutyMode?: DutyMode; jurisdiction?: string; purok?: string },
-    isOnline: boolean = true
+    isOnline: boolean = isAppOnline()
   ): Promise<void> {
     const target = localReportsStore.find(
       (r) => r.reportId === reportId || (r.reportNumber && r.reportNumber === reportId)
@@ -896,7 +897,7 @@ export class ReportService {
     responderUid: string,
     responderName: string,
     assigner: { uid: string; fullName: string; role: UserRole; dutyStatus?: DutyStatus; dutyMode?: DutyMode; jurisdiction?: string; purok?: string },
-    isOnline: boolean = true
+    isOnline: boolean = isAppOnline()
   ): Promise<void> {
     if (!responderUid || !responderUid.trim() || !responderName || !responderName.trim()) {
       throw new Error('Please select a responder before assigning this report.');
@@ -1040,7 +1041,7 @@ export class ReportService {
   async addTimelineEvent(
     reportId: string,
     eventData: Omit<ReportTimelineEvent, 'eventId' | 'createdAt'> & { dutyStatus?: DutyStatus; dutyMode?: DutyMode; jurisdiction?: string; purok?: string },
-    isOnline: boolean = true
+    isOnline: boolean = isAppOnline()
   ): Promise<void> {
     const target = localReportsStore.find(
       (r) => r.reportId === reportId || (r.reportNumber && r.reportNumber === reportId)
@@ -1195,7 +1196,7 @@ export class ReportService {
     reportId: string,
     remarks: string,
     performer: { uid: string; fullName: string; role: UserRole; dutyStatus?: DutyStatus; dutyMode?: DutyMode; jurisdiction?: string; purok?: string },
-    isOnline: boolean = true
+    isOnline: boolean = isAppOnline()
   ): Promise<Report> {
     const isDispatcher =
       performer.role === 'admin' ||

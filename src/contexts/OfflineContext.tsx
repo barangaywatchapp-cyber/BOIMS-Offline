@@ -3,16 +3,21 @@
  * Provides global online/offline status, queue count, and triggerSync function
  */
 
-import React, { createContext, useContext, ReactNode } from 'react';
+import React, { createContext, useContext, ReactNode, useState, useEffect } from 'react';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useSyncQueue } from '../hooks/useSyncQueue';
 import { useOfflineBootstrap } from '../offline/useOfflineBootstrap';
 import { OfflineBootstrapResult } from '../offline/bootstrap';
 import { SyncQueueItem, User } from '../types';
 import { DeadLetterItem, DLQStats } from '../offline/types';
+import { networkManager, NetworkStatus } from '../offline/networkManager';
 
 export interface OfflineContextType {
   isOnline: boolean;
+  isSimulatedOffline: boolean;
+  actualBrowserOnline: boolean;
+  setSimulatedOffline: (simulated: boolean) => void;
+  toggleSimulatedOffline: () => boolean;
   isInitializing: boolean;
   bootstrapResult: OfflineBootstrapResult | null;
   storageAvailable: boolean;
@@ -38,6 +43,14 @@ const OfflineContext = createContext<OfflineContextType | undefined>(undefined);
 
 export function OfflineProvider({ children }: { children: ReactNode }) {
   const isOnline = useOnlineStatus();
+  const [networkStatus, setNetworkStatus] = useState<NetworkStatus>(() => networkManager.getNetworkStatus());
+
+  useEffect(() => {
+    return networkManager.subscribe((status) => {
+      setNetworkStatus(status);
+    });
+  }, []);
+
   const { isInitializing, result: bootstrapResult } = useOfflineBootstrap();
   const {
     queue,
@@ -62,7 +75,11 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
   return (
     <OfflineContext.Provider
       value={{
-        isOnline,
+        isOnline: networkStatus.isOnline,
+        isSimulatedOffline: networkStatus.isSimulatedOffline,
+        actualBrowserOnline: networkStatus.actualBrowserOnline,
+        setSimulatedOffline: (sim) => networkManager.setSimulatedOffline(sim),
+        toggleSimulatedOffline: () => networkManager.toggleSimulatedOffline(),
         isInitializing,
         bootstrapResult,
         storageAvailable,

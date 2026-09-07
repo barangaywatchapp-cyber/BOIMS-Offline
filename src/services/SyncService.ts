@@ -35,6 +35,7 @@ import {
   detectMutationConflict,
 } from '../offline/types';
 import { syncQueueMigration, normalizeCollectionName } from '../offline/syncMigration';
+import { networkManager, isAppOnline } from '../offline/networkManager';
 
 const MAX_RETRIES = 3;
 
@@ -50,21 +51,24 @@ class SyncService {
     this.init();
 
     if (typeof window !== 'undefined') {
-      window.addEventListener('online', async () => {
-        console.log('[SyncService] Network status: Online. Auto-triggering Sync Queue processing...');
-        // Await Firebase Auth readiness to prevent unauthenticated replay race
-        if (auth && typeof auth.authStateReady === 'function') {
-          try {
-            await auth.authStateReady();
-          } catch (_) {}
+      // Listen to physical and simulated network transitions
+      networkManager.subscribe(async (status) => {
+        if (status.isOnline) {
+          console.log('[SyncService] Effective status: Online. Auto-triggering Sync Queue processing...');
+          // Await Firebase Auth readiness to prevent unauthenticated replay race
+          if (auth && typeof auth.authStateReady === 'function') {
+            try {
+              await auth.authStateReady();
+            } catch (_) {}
+          }
+          this.processQueue();
         }
-        this.processQueue();
       });
 
       // Synchronize queue replay with Firebase Auth readiness
       try {
         onAuthStateChanged(auth, (firebaseUser) => {
-          if (firebaseUser && typeof navigator !== 'undefined' && navigator.onLine) {
+          if (firebaseUser && isAppOnline()) {
             this.processQueue();
           }
         });
@@ -93,7 +97,7 @@ class SyncService {
       this.isInitialized = true;
 
       // 3. If online, trigger queue processing
-      if (typeof navigator !== 'undefined' && navigator.onLine) {
+      if (isAppOnline()) {
         setTimeout(() => this.processQueue(), 250);
       }
     } catch (e) {
@@ -183,7 +187,7 @@ class SyncService {
       })
       .then(async () => {
         await this.refreshMemoryQueue();
-        if (typeof navigator !== 'undefined' && navigator.onLine) {
+        if (isAppOnline()) {
           setTimeout(() => this.processQueue(), 300);
         }
       })
@@ -257,8 +261,8 @@ class SyncService {
       return { processed: 0, failed: 0 };
     }
 
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      console.warn('[SyncService] Cannot process queue: Client is offline.');
+    if (!isAppOnline()) {
+      console.warn('[SyncService] Cannot process queue: Client is offline (simulated or network).');
       return { processed: 0, failed: 0 };
     }
 
@@ -276,7 +280,7 @@ class SyncService {
       } else {
         // If auth.currentUser is not yet populated, check whether an active offline session exists
         const session = await offlineStorage.getSession();
-        if (session && session.sessionState !== 'revoked') {
+        if (session && (session.sessionState as string) !== 'expired') {
           console.warn('[SyncService] Replay deferred: Firebase Auth session is restoring...');
           return { processed: 0, failed: 0 };
         }
@@ -324,8 +328,8 @@ class SyncService {
         }
 
         // Re-check online status before each item
-        if (typeof navigator !== 'undefined' && !navigator.onLine) {
-          console.warn('[SyncService] Connection lost during replay. Suspending sync loop.');
+        if (!isAppOnline()) {
+          console.warn('[SyncService] Connection lost or simulated offline enabled during replay. Suspending sync loop.');
           break;
         }
 
@@ -519,7 +523,7 @@ class SyncService {
     }
 
     // Check if new pending items arrived while processing and drain if still online
-    if (typeof navigator !== 'undefined' && navigator.onLine) {
+    if (isAppOnline()) {
       const remaining = this.getQueue().filter((item) => item.status === 'pending');
       if (remaining.length > 0) {
         setTimeout(() => this.processQueue(), 300);
@@ -754,7 +758,7 @@ class SyncService {
       await dlqService.retryDLQItem(dlqId, contextUser);
       await this.refreshMemoryQueue();
 
-      if (typeof navigator !== 'undefined' && navigator.onLine) {
+      if (isAppOnline()) {
         setTimeout(() => this.processQueue(), 250);
       }
       return true;

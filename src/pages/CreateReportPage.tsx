@@ -9,7 +9,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, NavLink } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
-import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { useOffline } from '../contexts/OfflineContext';
 import { reportService } from '../services/reportService';
 import { storageService, compressAndEncodeFileForFirestore } from '../services/storageService';
 import { INCIDENT_CATEGORIES, ROUTES, APP_METADATA } from '../constants';
@@ -55,7 +55,7 @@ export const CreateReportPage: React.FC = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { showToast } = useToast();
-  const isOnline = useOnlineStatus();
+  const { isOnline, isSimulatedOffline } = useOffline();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const userJurisdiction = (user?.jurisdiction || user?.purok || 'Purok 1').trim();
@@ -215,7 +215,12 @@ export const CreateReportPage: React.FC = () => {
       );
 
       if (!isOnline) {
-        showToast('Report saved offline. Will automatically sync when connection returns.', 'warning');
+        showToast(
+          isSimulatedOffline
+            ? 'Report saved in offline queue (Simulated Offline Mode). Disable simulation to sync.'
+            : 'Report saved offline. Will automatically sync when connection returns.',
+          'warning'
+        );
       } else {
         showToast(`Incident report ${created.reportNumber} submitted successfully with storage attachments!`, 'success');
       }
@@ -250,7 +255,7 @@ export const CreateReportPage: React.FC = () => {
             <div className="flex items-center gap-2">
               <WifiOff className="w-4 h-4 text-amber-700 shrink-0" />
               <span>
-                <strong>Offline Mode Active:</strong> You can still file this report. It will be saved locally and queued for automatic sync as soon as you reconnect.
+                <strong>{isSimulatedOffline ? 'Simulated Offline Mode Active:' : 'Offline Mode Active:'}</strong> You can still file this report. It will be saved locally and queued in IndexedDB for automatic sync when {isSimulatedOffline ? 'simulation is disabled' : 'connection returns'}.
               </span>
             </div>
           </Alert>

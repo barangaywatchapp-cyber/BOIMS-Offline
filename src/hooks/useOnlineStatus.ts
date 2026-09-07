@@ -1,27 +1,21 @@
 /**
  * Custom Hook: useOnlineStatus
- * Continuously monitors network connection and online/offline status
+ * Continuously monitors effective network connection taking into account
+ * physical connectivity and application-level simulated offline mode.
  */
 
 import { useState, useEffect } from 'react';
+import { networkManager, NetworkStatus } from '../offline/networkManager';
 
 export function useOnlineStatus(): boolean {
-  const [isOnline, setIsOnline] = useState<boolean>(
-    typeof navigator !== 'undefined' ? navigator.onLine : true
-  );
+  const [isOnline, setIsOnline] = useState<boolean>(() => networkManager.isAppOnline());
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
+    return networkManager.subscribe((status: NetworkStatus) => {
+      setIsOnline(status.isOnline);
+    });
   }, []);
 
   return isOnline;
 }
+

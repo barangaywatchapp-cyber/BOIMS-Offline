@@ -25,6 +25,7 @@ import {
   OFFLINE_SESSION_TTL_MS,
   OFFLINE_SESSION_SCHEMA_VERSION,
 } from '../offline/types';
+import { isAppOnline } from '../offline/networkManager';
 
 interface AuthContextType {
   user: User | null;
@@ -333,7 +334,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       } else {
         // firebaseUser is null
-        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+        const isOffline = !isAppOnline();
         if (isOffline) {
           try {
             const session = await offlineStorage.getSession();
