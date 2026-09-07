@@ -566,12 +566,29 @@ service cloud.firestore {
           (!('escalatedBy' in request.resource.data) || request.resource.data.escalatedBy == request.auth.uid) &&
           (request.resource.data.status != 'escalated' || ('escalatedBy' in request.resource.data && request.resource.data.escalatedBy == request.auth.uid)) &&
           (request.resource.data.status == 'resolved' || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['resolvedBy', 'resolvedAt', 'resolutionRemarks', 'resolutionNotes'])) &&
+          // Escalation metadata & blotterCaseId locked to status == 'escalated'
+          (request.resource.data.status == 'escalated' || !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'escalatedBy', 'escalatedByName', 'escalatedAt', 'escalationRemarks', 'blotterCaseId'
+          ])) &&
+          // When blotterCaseId is attached, verify cross-document integrity against the pre-created blotter case
+          (
+            !('blotterCaseId' in request.resource.data) ||
+            (
+              request.resource.data.status == 'escalated' &&
+              resource.data.category == 'neighborhood_dispute' &&
+              request.resource.data.blotterCaseId is string &&
+              request.resource.data.blotterCaseId.size() > 0 &&
+              exists(/databases/$(database)/documents/blotterCases/$(request.resource.data.blotterCaseId)) &&
+              get(/databases/$(database)/documents/blotterCases/$(request.resource.data.blotterCaseId)).data.createdBy == request.auth.uid &&
+              get(/databases/$(database)/documents/blotterCases/$(request.resource.data.blotterCaseId)).data.status == 'open'
+            )
+          ) &&
           (resource == null || !('timeline' in resource.data) || !('timeline' in request.resource.data) || request.resource.data.timeline.hasAll(resource.data.timeline)) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'status', 'timeline', 'updatedAt', 'priority', 'category', 'description', 'title',
             'assignedTo', 'assignedToName', 'assignedBy', 'assignedAt', 'assignedResponders',
             'resolvedBy', 'resolvedAt', 'resolutionRemarks', 'resolutionNotes',
-            'escalatedBy', 'escalatedByName', 'escalatedAt', 'escalationRemarks',
+            'escalatedBy', 'escalatedByName', 'escalatedAt', 'escalationRemarks', 'blotterCaseId',
             'officialRemarks', 'statusLogs', 'imageUrls', 'location'
           ])
         ) ||
@@ -615,7 +632,25 @@ service cloud.firestore {
     // --- BLOTTER & COMPLAINTS ---
 
     match /blotterCases/{caseId} {
-      allow read, create, update, delete: if isSecretaryOrChairman();
+      // Secretary and Chairman retain exclusive read, update, conciliation, hearing, and deletion authority
+      allow read, update, delete: if isSecretaryOrChairman();
+      allow create: if isSecretaryOrChairman() || (
+        // Dispatcher escalation-created initial blotter case
+        isDispatcher() &&
+        request.resource.data.status == 'open' &&
+        request.resource.data.createdBy == request.auth.uid &&
+        request.resource.data.incidentType == 'Neighborhood Dispute (Escalated)' &&
+        request.resource.data.isDeleted == false &&
+        request.resource.data.caseId == caseId &&
+        request.resource.data.caseNumber == caseId &&
+        // Strict guard against unprivileged Lupon/KP field tampering
+        (!('hearings' in request.resource.data) || request.resource.data.hearings.size() == 0) &&
+        (!('hearingSchedule' in request.resource.data) || request.resource.data.hearingSchedule == null) &&
+        (!('resolutionSummary' in request.resource.data) || request.resource.data.resolutionSummary == null) &&
+        (!('cfaIssued' in request.resource.data) || request.resource.data.cfaIssued == false) &&
+        (!('cfaControlNumber' in request.resource.data) || request.resource.data.cfaControlNumber == null) &&
+        (!('deletedAt' in request.resource.data) || request.resource.data.deletedAt == null)
+      );
     }
 
     // --- INVENTORY MANAGEMENT ---
@@ -646,6 +681,18 @@ service cloud.firestore {
         )
       );
       allow create: if isAuthenticated() && (
+        // Operational escalation notification to Secretary from an on-duty Dispatcher
+        (
+          isDispatcher() &&
+          request.resource.data.userId == 'staff_secretary' &&
+          request.resource.data.type == 'reportEscalated' &&
+          request.resource.data.createdBy == request.auth.uid &&
+          'reportId' in request.resource.data &&
+          request.resource.data.reportId is string &&
+          request.resource.data.reportId.size() > 0 &&
+          exists(/databases/$(database)/documents/reports/$(request.resource.data.reportId)) &&
+          get(/databases/$(database)/documents/reports/$(request.resource.data.reportId)).data.status != 'resolved'
+        ) ||
         // System-wide broadcast notifications (Secretary, Chairman, Admin only)
         (
           request.resource.data.userId in ['all', 'all_residents', 'all_staff', 'staff_secretary'] &&
