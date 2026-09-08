@@ -431,6 +431,7 @@ export const OFFLINE_MUTABLE_COLLECTIONS = [
   'certificateRequests',
   'blotterCases',
   'inventory',
+  'residents',
 ] as const;
 
 export type OfflineMutableCollection =
@@ -577,6 +578,27 @@ export function isMutationAuthorized(
   }
 
   const role = user.role;
+  const collection = mutation.collectionName;
+  const operation = mutation.operation;
+
+  // STRICT RESIDENT DIRECTORY / RESIDENT REGISTRATION AUTHORIZATION BOUNDARY:
+  // Under the existing Resident Directory authorization boundary:
+  // - Secretary: ALLOWED
+  // - Chairman: ALLOWED
+  // - Verifier: DENIED
+  // - Purok Official: DENIED
+  // - Purok Leader: DENIED
+  // - Administrator: DENIED
+  // - Resident: DENIED
+  // All other roles are strictly DENIED.
+  // The offline CREATE mutation must strictly inherit the existing Resident Directory authorization boundary.
+  if (collection === 'residents') {
+    if (operation === 'create' || operation === 'update' || operation === 'delete') {
+      return role === 'secretary' || role === 'chairman';
+    }
+    return false;
+  }
+
   const isPrivilegedAdmin =
     role === 'admin' ||
     role === 'superAdmin' ||
@@ -586,9 +608,6 @@ export function isMutationAuthorized(
   if (isPrivilegedAdmin) {
     return true;
   }
-
-  const collection = mutation.collectionName;
-  const operation = mutation.operation;
 
   switch (collection) {
     case 'reports':

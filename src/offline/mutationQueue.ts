@@ -45,9 +45,26 @@ export class OfflineMutationQueue {
         // Fallback if session read fails
       }
     }
+    if (!authorUser && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) {
+          authorUser = JSON.parse(stored);
+        }
+      } catch {
+        // Fallback if localStorage read fails
+      }
+    }
 
     // 2. Enforce Role-Based Authorization
-    if (authorUser && !isMutationAuthorized(params, authorUser)) {
+    if (params.collectionName === 'residents') {
+      if (!authorUser || !isMutationAuthorized(params, authorUser)) {
+        const role = authorUser?.role || 'unauthenticated';
+        throw new Error(
+          `Unauthorized offline mutation: Role '${role}' is not permitted to perform '${params.operation}' on collection 'residents'. Only Secretary and Chairman are authorized.`
+        );
+      }
+    } else if (authorUser && !isMutationAuthorized(params, authorUser)) {
       throw new Error(
         `Unauthorized offline mutation: Role '${authorUser.role}' is not permitted to perform '${params.operation}' on collection '${params.collectionName}'.`
       );

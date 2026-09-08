@@ -7,8 +7,11 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
+import { isAppOnline } from '../offline/networkManager';
 import { Avatar } from '../components/foundation/Avatar';
 import { residentService } from '../services/residentService';
+import { canRegisterResident } from '../utils/permissions';
 import { HouseholdsDirectoryPage } from './HouseholdsDirectoryPage';
 import { HouseholdStatusBadge } from '../components/households/HouseholdStatusBadge';
 import {
@@ -67,6 +70,7 @@ const PUROK_OPTIONS = ['Purok 1', 'Purok 2', 'Purok 3', 'Purok 4', 'Purok 5', 'P
 
 export const ResidentsDirectoryPage: React.FC = () => {
   const { user, role, isAuthInitialized } = useAuth();
+  const { showToast } = useToast();
 
   const [residents, setResidents] = useState<ResidentProfile[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -212,7 +216,8 @@ export const ResidentsDirectoryPage: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  const canManageResidents = ['admin', 'chairman', 'secretary'].includes(role || '');
+  // Strictly limited to Secretary and Chairman ONLY per Resident Directory authorization boundary
+  const canManageResidents = canRegisterResident(role);
 
   const fetchResidents = async () => {
     setLoading(true);
@@ -255,6 +260,10 @@ export const ResidentsDirectoryPage: React.FC = () => {
 
   const handleCreateResident = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManageResidents) {
+      setFormError('Unauthorized: Only Secretary and Chairman are permitted to register residents.');
+      return;
+    }
     if (!firstName.trim() || !lastName.trim() || !contactNumber.trim() || !address.trim()) {
       setFormError('Please complete all required fields (*).');
       return;
@@ -289,7 +298,7 @@ export const ResidentsDirectoryPage: React.FC = () => {
           province: 'Rizal',
           idType,
           idNumber,
-          verificationStatus: canManageResidents ? 'verified' : 'unverified',
+          verificationStatus: 'verified',
           voterStatus,
           voterPrecinctNo,
           sectors,
@@ -298,7 +307,8 @@ export const ResidentsDirectoryPage: React.FC = () => {
           emergencyContactNumber,
           residencyStatus: 'active',
         },
-        user?.uid || 'system'
+        user?.uid || 'system',
+        user
       );
 
       // Reset Form
@@ -313,6 +323,12 @@ export const ResidentsDirectoryPage: React.FC = () => {
       setVoterPrecinctNo('');
       setSectors([]);
       setShowCreateModal(false);
+
+      if (!isAppOnline()) {
+        showToast('Resident registered locally — queued for synchronization.', 'warning');
+      } else {
+        showToast('Resident profile registered successfully!', 'success');
+      }
 
       await fetchResidents();
     } catch (err: any) {

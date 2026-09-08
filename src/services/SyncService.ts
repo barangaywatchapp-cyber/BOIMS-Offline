@@ -146,7 +146,8 @@ class SyncService {
     operationType: 'create' | 'update' | 'delete',
     collectionName: string,
     recordId: string,
-    payload: any
+    payload: any,
+    contextUser?: User | null
   ): SyncQueueItem | null {
     if (!recordId || recordId === 'undefined' || recordId === 'null') {
       console.warn(
@@ -157,6 +158,28 @@ class SyncService {
     }
 
     const normalizedCollection = normalizeCollectionName(collectionName);
+
+    // Resolve author user context
+    let authorUser: User | null = contextUser || null;
+    if (!authorUser && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) authorUser = JSON.parse(stored);
+      } catch {}
+    }
+
+    // Enforce strict authorization on residents collection: Secretary & Chairman ONLY
+    if (normalizedCollection === 'residents') {
+      const isAuthorized = authorUser && (authorUser.role === 'secretary' || authorUser.role === 'chairman');
+      if (!isAuthorized) {
+        const role = authorUser?.role || 'unauthenticated';
+        console.warn(`[SyncService] Refusing unauthorized mutation on residents by role: ${role}`);
+        throw new Error(
+          `Unauthorized offline mutation: Role '${role}' is not permitted to perform '${operationType}' on collection 'residents'. Only Secretary and Chairman are authorized.`
+        );
+      }
+    }
+
     const queueId = `MUT-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const now = new Date().toISOString();
 
@@ -177,14 +200,19 @@ class SyncService {
 
     // Persist via offlineMutationQueue to IndexedDB & apply optimistic cache
     offlineMutationQueue
-      .enqueue({
-        operation: operationType as OfflineOperation,
-        collectionName: normalizedCollection as OfflineMutableCollection,
-        recordId,
-        payload,
-        clientGeneratedId: true,
-        applyOptimistic: true,
-      })
+      .enqueue(
+        {
+          operation: operationType as OfflineOperation,
+          collectionName: normalizedCollection as OfflineMutableCollection,
+          recordId,
+          payload,
+          clientGeneratedId: true,
+          applyOptimistic: true,
+          userId: authorUser?.uid,
+          userRole: authorUser?.role,
+        },
+        authorUser
+      )
       .then(async () => {
         await this.refreshMemoryQueue();
         if (isAppOnline()) {

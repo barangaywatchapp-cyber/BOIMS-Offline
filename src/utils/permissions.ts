@@ -68,6 +68,21 @@ export function canAccessResidentDirectory(role: UserRole | null): boolean {
 }
 
 /**
+ * Roles allowed to create and register residents in the Resident Directory.
+ * Strictly limited to: Secretary and Chairman.
+ * Explicitly DENIED: verifier, purokOfficial, purokLeader, admin, superAdmin, developer, resident.
+ */
+export const ALLOWED_RESIDENT_REGISTRATION_ROLES: UserRole[] = [
+  'secretary',
+  'chairman',
+];
+
+export function canRegisterResident(role: UserRole | null | undefined): boolean {
+  if (!role) return false;
+  return ALLOWED_RESIDENT_REGISTRATION_ROLES.includes(role);
+}
+
+/**
  * Checks if a user can access My Household (/households).
  * Visible/accessible ONLY when operating in Resident Mode.
  */

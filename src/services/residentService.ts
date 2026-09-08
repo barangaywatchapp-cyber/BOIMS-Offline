@@ -45,6 +45,8 @@ import {
 import { APP_METADATA } from '../constants';
 import { filterResidentsByAccess, filterHouseholdsByAccess } from '../utils/jurisdictionUtils';
 import { isResidentMode } from '../utils/permissions';
+import { isAppOnline } from '../offline/networkManager';
+import { offlineStorage } from '../offline/storage';
 
 const RESIDENTS_COLLECTION = 'residents';
 const HOUSEHOLDS_COLLECTION = 'households';
@@ -58,13 +60,76 @@ class ResidentService {
   private memoryResidents: ResidentProfile[] = [];
   private memoryHouseholds: Household[] = [];
 
+  constructor() {
+    this.initLocalCache();
+  }
+
+  private async initLocalCache(): Promise<void> {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem(LOCAL_RESIDENTS_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            this.memoryResidents = parsed;
+          }
+        }
+      } catch (err) {
+        // ignore
+      }
+    }
+
+    try {
+      const cached = await offlineStorage.getCachedEntities<ResidentProfile>(RESIDENTS_COLLECTION);
+      if (cached && cached.length > 0) {
+        const map = new Map<string, ResidentProfile>();
+        this.memoryResidents.forEach((r) => map.set(r.residentId, r));
+        cached.forEach((c) => {
+          if (c.data && c.data.residentId) {
+            map.set(c.data.residentId, c.data);
+          }
+        });
+        this.memoryResidents = Array.from(map.values());
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(LOCAL_RESIDENTS_KEY, JSON.stringify(this.memoryResidents));
+        }
+      }
+    } catch {
+      // offline storage may initialize asynchronously
+    }
+  }
+
   // Local storage cache helpers
   private getLocalResidents(): ResidentProfile[] {
+    if (this.memoryResidents.length > 0) {
+      return this.memoryResidents;
+    }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem(LOCAL_RESIDENTS_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            this.memoryResidents = parsed;
+            return this.memoryResidents;
+          }
+        }
+      } catch (err) {
+        console.warn('[ResidentService] Failed to read residents from localStorage:', err);
+      }
+    }
     return this.memoryResidents;
   }
 
   private saveLocalResidents(data: ResidentProfile[]): void {
     this.memoryResidents = data;
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(LOCAL_RESIDENTS_KEY, JSON.stringify(data));
+      } catch (err) {
+        console.warn('[ResidentService] Failed to save residents to localStorage:', err);
+      }
+    }
   }
 
   private getLocalHouseholds(): Household[] {
@@ -106,102 +171,168 @@ class ResidentService {
 
     if (!auth.currentUser) {
       // Unauthenticated user: do NOT query Firestore. Return local cache.
-      residents = this.getLocalResidents();
+      try {
+        const cached = await offlineStorage.getCachedEntities<ResidentProfile>(RESIDENTS_COLLECTION);
+        const map = new Map<string, ResidentProfile>();
+        this.getLocalResidents().forEach((r) => map.set(r.residentId, r));
+        cached.forEach((c) => {
+          if (c.data && c.data.residentId) {
+            map.set(c.data.residentId, c.data);
+          }
+        });
+        residents = Array.from(map.values());
+      } catch {
+        residents = this.getLocalResidents();
+      }
       if (userObj) {
         residents = filterResidentsByAccess(residents, userObj);
       }
       return residents.filter((r) => !r.isDeleted).sort((a, b) => a.fullName.localeCompare(b.fullName));
     }
 
-    const activeRole = userObj?.role || null;
-    const isResidentRole = isResidentMode(userObj, activeRole);
+    // Offline path: immediately serve from IndexedDB entity cache and local storage without Firestore timeout
+    if (!isAppOnline()) {
+      try {
+        const cached = await offlineStorage.getCachedEntities<ResidentProfile>(RESIDENTS_COLLECTION);
+        const map = new Map<string, ResidentProfile>();
+        this.getLocalResidents().forEach((r) => map.set(r.residentId, r));
+        cached.forEach((c) => {
+          if (c.data && c.data.residentId) {
+            map.set(c.data.residentId, c.data);
+          }
+        });
+        residents = Array.from(map.values());
+        this.saveLocalResidents(residents);
+      } catch {
+        residents = this.getLocalResidents();
+      }
+    } else {
+      const activeRole = userObj?.role || null;
+      const isResidentRole = isResidentMode(userObj, activeRole);
 
-    const staffRoles = [
-      'secretary',
-      'treasurer',
-      'executiveOfficer',
-      'admin',
-      'chairman',
-      'developer',
-      'verificationOfficer',
-      'purokLeader',
-      'purokOfficial',
-      'verifier',
-      'superAdmin',
-    ];
+      const staffRoles = [
+        'secretary',
+        'treasurer',
+        'executiveOfficer',
+        'admin',
+        'chairman',
+        'developer',
+        'verificationOfficer',
+        'purokLeader',
+        'purokOfficial',
+        'verifier',
+        'superAdmin',
+      ];
 
-    const isConfirmedStaff = Boolean(activeRole && staffRoles.includes(activeRole) && !isResidentRole);
+      const isConfirmedStaff = Boolean(activeRole && staffRoles.includes(activeRole) && !isResidentRole);
 
-    try {
-      const colRef = collection(db, RESIDENTS_COLLECTION);
+      try {
+        const colRef = collection(db, RESIDENTS_COLLECTION);
 
-      if (!isConfirmedStaff) {
-        // Resident, non-staff, or unresolved role: DIRECTLY execute user-scoped query to prevent permission-denied
-        const q = query(
-          colRef,
-          where('linkedUserId', '==', auth.currentUser.uid),
-          where('isDeleted', '==', false)
-        );
-        try {
-          const snapshot = await getDocs(q);
+        if (!isConfirmedStaff) {
+          // Resident, non-staff, or unresolved role: DIRECTLY execute user-scoped query to prevent permission-denied
+          const q = query(
+            colRef,
+            where('linkedUserId', '==', auth.currentUser.uid),
+            where('isDeleted', '==', false)
+          );
+          try {
+            const snapshot = await getDocs(q);
+            if (!snapshot.empty) {
+              const remoteList = snapshot.docs.map((doc) => ({
+                residentId: doc.id,
+                ...doc.data(),
+              })) as ResidentProfile[];
+              const map = new Map<string, ResidentProfile>();
+              this.getLocalResidents().forEach((r) => map.set(r.residentId, r));
+              remoteList.forEach((r) => map.set(r.residentId, r));
+              residents = Array.from(map.values());
+              this.saveLocalResidents(residents);
+            } else {
+              residents = this.getLocalResidents();
+            }
+          } catch (err) {
+            console.warn('[ResidentService] Scoped query failed:', err);
+            residents = this.getLocalResidents();
+          }
+        } else {
+          // Confirmed staff/admin: execute authorized collection query
+          const constraints: QueryConstraint[] = [where('isDeleted', '==', false)];
+
+          if (filters?.purok && filters.purok !== 'all') {
+            constraints.push(where('purok', '==', filters.purok));
+          }
+          if (filters?.voterStatus && filters.voterStatus !== 'all') {
+            constraints.push(where('voterStatus', '==', filters.voterStatus));
+          }
+          if (filters?.verificationStatus && filters.verificationStatus !== 'all') {
+            constraints.push(where('verificationStatus', '==', filters.verificationStatus));
+          }
+          if (filters?.residencyStatus && filters.residencyStatus !== 'all') {
+            constraints.push(where('residencyStatus', '==', filters.residencyStatus));
+          }
+          if (filters?.lastDoc) {
+            constraints.push(startAfter(filters.lastDoc));
+          }
+          if (filters?.limitCount && filters.limitCount > 0) {
+            constraints.push(limit(filters.limitCount));
+          }
+
+          let snapshot;
+          try {
+            const q = query(colRef, ...constraints);
+            snapshot = await getDocs(q);
+          } catch (indexErr) {
+            console.warn('[ResidentService] Constrained query failed (missing index or offline), falling back to basic query:', indexErr);
+            const fallbackQ = query(colRef, where('isDeleted', '==', false));
+            snapshot = await getDocs(fallbackQ);
+          }
+
           if (!snapshot.empty) {
-            residents = snapshot.docs.map((doc) => ({
+            const remoteList = snapshot.docs.map((doc) => ({
               residentId: doc.id,
               ...doc.data(),
             })) as ResidentProfile[];
+
+            const map = new Map<string, ResidentProfile>();
+            this.getLocalResidents().forEach((r) => map.set(r.residentId, r));
+            remoteList.forEach((r) => map.set(r.residentId, r));
+            residents = Array.from(map.values());
+            this.saveLocalResidents(residents);
+
+            // Asynchronously sync to IndexedDB offlineEntities
+            offlineStorage
+              .putCachedEntities(
+                RESIDENTS_COLLECTION,
+                residents.map((item) => ({
+                  recordId: item.residentId,
+                  data: item,
+                  updatedAt: item.updatedAt || item.createdAt,
+                }))
+              )
+              .catch((err) => {
+                console.warn('[ResidentService] Failed to cache residents in IndexedDB:', err);
+              });
           } else {
             residents = this.getLocalResidents();
           }
-        } catch (err) {
-          console.warn('[ResidentService] Scoped query failed:', err);
-          residents = this.getLocalResidents();
         }
-      } else {
-        // Confirmed staff/admin: execute authorized collection query
-        const constraints: QueryConstraint[] = [where('isDeleted', '==', false)];
-
-        if (filters?.purok && filters.purok !== 'all') {
-          constraints.push(where('purok', '==', filters.purok));
-        }
-        if (filters?.voterStatus && filters.voterStatus !== 'all') {
-          constraints.push(where('voterStatus', '==', filters.voterStatus));
-        }
-        if (filters?.verificationStatus && filters.verificationStatus !== 'all') {
-          constraints.push(where('verificationStatus', '==', filters.verificationStatus));
-        }
-        if (filters?.residencyStatus && filters.residencyStatus !== 'all') {
-          constraints.push(where('residencyStatus', '==', filters.residencyStatus));
-        }
-        if (filters?.lastDoc) {
-          constraints.push(startAfter(filters.lastDoc));
-        }
-        if (filters?.limitCount && filters.limitCount > 0) {
-          constraints.push(limit(filters.limitCount));
-        }
-
-        let snapshot;
+      } catch (err) {
+        console.warn('[ResidentService] Remote query failed, falling back to IndexedDB/local cache:', err);
         try {
-          const q = query(colRef, ...constraints);
-          snapshot = await getDocs(q);
-        } catch (indexErr) {
-          console.warn('[ResidentService] Constrained query failed (missing index or offline), falling back to basic query:', indexErr);
-          const fallbackQ = query(colRef, where('isDeleted', '==', false));
-          snapshot = await getDocs(fallbackQ);
-        }
-
-        if (!snapshot.empty) {
-          residents = snapshot.docs.map((doc) => ({
-            residentId: doc.id,
-            ...doc.data(),
-          })) as ResidentProfile[];
-          this.saveLocalResidents(residents);
-        } else {
+          const cached = await offlineStorage.getCachedEntities<ResidentProfile>(RESIDENTS_COLLECTION);
+          const map = new Map<string, ResidentProfile>();
+          this.getLocalResidents().forEach((r) => map.set(r.residentId, r));
+          cached.forEach((c) => {
+            if (c.data && c.data.residentId) {
+              map.set(c.data.residentId, c.data);
+            }
+          });
+          residents = Array.from(map.values());
+        } catch {
           residents = this.getLocalResidents();
         }
       }
-    } catch (err) {
-      console.warn('[ResidentService] Offline fallback for getResidents:', err);
-      residents = this.getLocalResidents();
     }
 
     // Exclude deleted residents
@@ -258,16 +389,36 @@ class ResidentService {
    * Fetch single resident profile
    */
   async getResidentById(residentId: string): Promise<ResidentProfile | null> {
+    if (!isAppOnline()) {
+      try {
+        const cached = await offlineStorage.getCachedEntity<ResidentProfile>(RESIDENTS_COLLECTION, residentId);
+        if (cached && cached.data) return cached.data;
+      } catch {}
+      const locals = this.getLocalResidents();
+      return locals.find((r) => r.residentId === residentId) || null;
+    }
+
     try {
       const docRef = doc(db, RESIDENTS_COLLECTION, residentId);
       const snap = await getDoc(docRef);
 
       if (snap.exists()) {
-        return { residentId: snap.id, ...snap.data() } as ResidentProfile;
+        const profile = { residentId: snap.id, ...snap.data() } as ResidentProfile;
+        offlineStorage
+          .putCachedEntity(RESIDENTS_COLLECTION, residentId, profile, {
+            updatedAt: profile.updatedAt || profile.createdAt,
+          })
+          .catch(() => {});
+        return profile;
       }
     } catch (err) {
       console.warn('[ResidentService] Offline fallback for getResidentById:', err);
     }
+
+    try {
+      const cached = await offlineStorage.getCachedEntity<ResidentProfile>(RESIDENTS_COLLECTION, residentId);
+      if (cached && cached.data) return cached.data;
+    } catch {}
 
     const locals = this.getLocalResidents();
     return locals.find((r) => r.residentId === residentId) || null;
@@ -278,17 +429,76 @@ class ResidentService {
    */
   async createResident(
     data: Omit<ResidentProfile, 'residentId' | 'createdAt' | 'updatedAt' | 'isDeleted' | 'createdBy'>,
-    createdBy: string
+    createdBy: string,
+    currentUser?: User | null
   ): Promise<ResidentProfile> {
-    const id = `RES-${Date.now().toString().slice(-6)}`;
+    // 0. Authorization Boundary Check: Secretary & Chairman ONLY
+    let authorUser: User | null = currentUser || null;
+    if (!authorUser && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) authorUser = JSON.parse(stored);
+      } catch {}
+    }
+    const authorRole = authorUser?.role;
+    if (authorRole && authorRole !== 'secretary' && authorRole !== 'chairman') {
+      throw new Error(
+        `Unauthorized: Role '${authorRole}' is not permitted to register residents. Only Secretary and Chairman are authorized.`
+      );
+    }
+
+    // 1. Validation of required fields
+    if (!data.firstName?.trim() || !data.lastName?.trim() || !data.contactNumber?.trim() || !data.address?.trim()) {
+      throw new Error('Please complete all required fields (*).');
+    }
+
+    // 2. Safe duplicate validation using local state
+    const locals = this.getLocalResidents();
+    const normFirst = data.firstName.trim().toLowerCase();
+    const normLast = data.lastName.trim().toLowerCase();
+    const isDuplicate = locals.some(
+      (r) =>
+        !r.isDeleted &&
+        r.firstName.trim().toLowerCase() === normFirst &&
+        r.lastName.trim().toLowerCase() === normLast &&
+        r.birthDate === data.birthDate
+    );
+    if (isDuplicate) {
+      throw new Error(
+        `A resident profile for "${data.firstName.trim()} ${data.lastName.trim()}" with birth date ${data.birthDate} already exists.`
+      );
+    }
+
+    // 3. Client-generated ID (guaranteed collision-free)
+    const existingIds = new Set(locals.map((r) => r.residentId));
+    let id = (data as any).residentId;
+    if (!id) {
+      let candidate = `RES-${Date.now().toString().slice(-6)}`;
+      let suffixCounter = 1;
+      while (existingIds.has(candidate)) {
+        candidate = `RES-${Date.now().toString().slice(-6)}-${suffixCounter++}`;
+      }
+      id = candidate;
+    }
+
     const now = new Date().toISOString();
+    const cleanFirstName = data.firstName.trim();
+    const cleanMiddleName = data.middleName?.trim() || '';
+    const cleanLastName = data.lastName.trim();
+    const cleanSuffix = data.suffix?.trim() || '';
+
+    const fullName = `${cleanFirstName} ${cleanMiddleName ? cleanMiddleName + ' ' : ''}${cleanLastName}${
+      cleanSuffix ? ' ' + cleanSuffix : ''
+    }`;
 
     const newResident: ResidentProfile = {
       ...data,
+      firstName: cleanFirstName,
+      middleName: cleanMiddleName,
+      lastName: cleanLastName,
+      suffix: cleanSuffix,
+      fullName,
       residentId: id,
-      fullName: `${data.firstName} ${data.middleName ? data.middleName + ' ' : ''}${data.lastName}${
-        data.suffix ? ' ' + data.suffix : ''
-      }`,
       verificationStatus: data.verificationStatus || 'unverified',
       residencyStatus: data.residencyStatus || 'active',
       isDeleted: false,
@@ -297,18 +507,42 @@ class ResidentService {
       createdBy: createdBy || 'system',
     };
 
-    // Save locally first
-    const locals = this.getLocalResidents();
-    locals.unshift(newResident);
-    this.saveLocalResidents(locals);
+    // 4. Save locally to memory + localStorage immediately
+    const updatedLocals = [newResident, ...locals.filter((r) => r.residentId !== id)];
+    this.saveLocalResidents(updatedLocals);
 
-    // Save to Firestore with sync fallback
+    // 5. Save to IndexedDB offlineEntities cache immediately
+    try {
+      await offlineStorage.putCachedEntity(RESIDENTS_COLLECTION, id, newResident, {
+        updatedAt: now,
+      });
+    } catch (cacheErr) {
+      console.warn('[ResidentService] Failed to cache resident in IndexedDB:', cacheErr);
+    }
+
+    // 6. Offline path: immediately enqueue to SyncService / offline queue and return to UI without waiting for Firestore
+    if (!isAppOnline()) {
+      console.info(`[ResidentService] Offline mode: Enqueueing resident creation mutation for ${id}`);
+      await syncService.enqueue('create', RESIDENTS_COLLECTION, id, newResident, authorUser);
+      return newResident;
+    }
+
+    // 7. Online path: attempt Firestore write with sync queue fallback
     try {
       const docRef = doc(db, RESIDENTS_COLLECTION, id);
       await setDoc(docRef, newResident);
-    } catch (error) {
-      console.warn('[ResidentService] Queueing offline create resident:', error);
-      syncService.enqueue('create', RESIDENTS_COLLECTION, id, newResident);
+    } catch (error: any) {
+      const isPermissionError =
+        error?.code === 'permission-denied' ||
+        error?.message?.includes('Missing or insufficient permissions') ||
+        error?.message?.includes('permission-denied');
+
+      if (isPermissionError) {
+        throw error;
+      }
+
+      console.warn('[ResidentService] Network write failed, queueing offline create resident:', error);
+      await syncService.enqueue('create', RESIDENTS_COLLECTION, id, newResident, authorUser);
     }
 
     return newResident;
@@ -336,9 +570,11 @@ class ResidentService {
 
     // Recompute full name if name fields updated
     if (updates.firstName || updates.lastName || updates.middleName || updates.suffix) {
-      updatedResident.fullName = `${updatedResident.firstName} ${
-        updatedResident.middleName ? updatedResident.middleName + ' ' : ''
-      }${updatedResident.lastName}${updatedResident.suffix ? ' ' + updatedResident.suffix : ''}`;
+      const fn = updates.firstName !== undefined ? updates.firstName : current.firstName;
+      const mn = updates.middleName !== undefined ? updates.middleName : current.middleName;
+      const ln = updates.lastName !== undefined ? updates.lastName : current.lastName;
+      const sfx = updates.suffix !== undefined ? updates.suffix : current.suffix;
+      updatedResident.fullName = `${fn.trim()} ${mn ? mn.trim() + ' ' : ''}${ln.trim()}${sfx ? ' ' + sfx.trim() : ''}`.trim();
     }
 
     // Update local cache
@@ -349,13 +585,26 @@ class ResidentService {
       this.saveLocalResidents(locals);
     }
 
+    try {
+      await offlineStorage.putCachedEntity(RESIDENTS_COLLECTION, residentId, updatedResident, {
+        updatedAt: now,
+      });
+    } catch (cacheErr) {
+      console.warn('[ResidentService] Failed to cache updated resident in IndexedDB:', cacheErr);
+    }
+
+    if (!isAppOnline()) {
+      await syncService.enqueue('update', RESIDENTS_COLLECTION, residentId, updatedResident);
+      return updatedResident;
+    }
+
     // Update Firestore
     try {
       const docRef = doc(db, RESIDENTS_COLLECTION, residentId);
       await updateDoc(docRef, updatedResident as any);
     } catch (error) {
       console.warn('[ResidentService] Queueing offline update resident:', error);
-      syncService.enqueue('update', RESIDENTS_COLLECTION, residentId, updatedResident);
+      await syncService.enqueue('update', RESIDENTS_COLLECTION, residentId, updatedResident);
     }
 
     return updatedResident;
@@ -399,11 +648,28 @@ class ResidentService {
     this.saveLocalResidents(updated);
 
     try {
+      const existing = await offlineStorage.getCachedEntity<ResidentProfile>(RESIDENTS_COLLECTION, residentId);
+      if (existing && existing.data) {
+        await offlineStorage.putCachedEntity(
+          RESIDENTS_COLLECTION,
+          residentId,
+          { ...existing.data, isDeleted: true, updatedAt: now },
+          { updatedAt: now }
+        );
+      }
+    } catch {}
+
+    if (!isAppOnline()) {
+      await syncService.enqueue('update', RESIDENTS_COLLECTION, residentId, { isDeleted: true, updatedAt: now });
+      return;
+    }
+
+    try {
       const docRef = doc(db, RESIDENTS_COLLECTION, residentId);
       await updateDoc(docRef, { isDeleted: true, updatedAt: now });
     } catch (error) {
       console.warn('[ResidentService] Queueing offline delete resident:', error);
-      syncService.enqueue('update', RESIDENTS_COLLECTION, residentId, { isDeleted: true, updatedAt: now });
+      await syncService.enqueue('update', RESIDENTS_COLLECTION, residentId, { isDeleted: true, updatedAt: now });
     }
   }
 
