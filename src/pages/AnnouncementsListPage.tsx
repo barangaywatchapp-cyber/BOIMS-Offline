@@ -6,7 +6,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { announcementService } from '../services/announcementService';
+import { announcementService, compareAnnouncementsDesc } from '../services/announcementService';
 import { notificationService } from '../services/notificationService';
 import { storageService } from '../services/storageService';
 import { isResidentMode, canCreateAnnouncements } from '../utils/permissions';
@@ -145,6 +145,9 @@ export const AnnouncementsListPage: React.FC = () => {
           a.category.toLowerCase().includes(q)
       );
     }
+
+    // Strictly enforce descending chronological order: LATEST -> OLDEST (newest timestamp -> oldest timestamp)
+    list.sort(compareAnnouncementsDesc);
 
     return list;
   }, [baseAnnouncements, selectedCategory, selectedAudience, selectedStatus, isResident, debouncedSearchQuery]);

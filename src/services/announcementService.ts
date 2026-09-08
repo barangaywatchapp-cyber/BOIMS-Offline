@@ -65,6 +65,42 @@ function isAuthorizedOfficial(role: UserRole): boolean {
 
 export const SEED_ANNOUNCEMENTS: Announcement[] = [];
 
+/**
+ * Safely extracts a numeric millisecond timestamp from an Announcement object.
+ * Checks createdAt, then publishAt, then updatedAt, handling ISO strings,
+ * Date objects, numeric timestamps, and Firestore Timestamp objects.
+ */
+export function getAnnouncementTimestamp(ann: Announcement | null | undefined): number {
+  if (!ann) return 0;
+  const val = ann.createdAt || ann.publishAt || ann.updatedAt;
+  if (!val) return 0;
+  if (typeof val === 'number') return val;
+  if (val instanceof Date) return val.getTime();
+  if (typeof val === 'object') {
+    if (typeof (val as any).toMillis === 'function') return (val as any).toMillis();
+    if (typeof (val as any).toDate === 'function') return (val as any).toDate().getTime();
+    if (typeof (val as any).seconds === 'number') {
+      return (val as any).seconds * 1000 + Math.floor(((val as any).nanoseconds || 0) / 1000000);
+    }
+  }
+  const parsed = new Date(val).getTime();
+  return isNaN(parsed) ? 0 : parsed;
+}
+
+/**
+ * Comparator to sort announcements strictly in descending chronological order:
+ * LATEST (newest timestamp) -> OLDEST (oldest timestamp).
+ * Uses announcementId as a deterministic tie-breaker for equal timestamps.
+ */
+export function compareAnnouncementsDesc(a: Announcement, b: Announcement): number {
+  const timeA = getAnnouncementTimestamp(a);
+  const timeB = getAnnouncementTimestamp(b);
+  if (timeB !== timeA) {
+    return timeB - timeA; // Descending: newest timestamp first, oldest timestamp last
+  }
+  return (b.announcementId || '').localeCompare(a.announcementId || '');
+}
+
 class AnnouncementService {
   private localAnnouncements: Announcement[] = [];
 
@@ -201,19 +237,8 @@ class AnnouncementService {
       );
     }
 
-    // Sort pinned first, then by priority (critical > high > medium > low), then created date
-    list.sort((a, b) => {
-      if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
-      const priorityWeight: Record<ReportPriority, number> = {
-        critical: 4,
-        high: 3,
-        medium: 2,
-        low: 1,
-      };
-      const diff = priorityWeight[b.priority] - priorityWeight[a.priority];
-      if (diff !== 0) return diff;
-      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-    });
+    // Sort chronologically in descending order: newest timestamp -> oldest timestamp (LATEST -> OLDEST)
+    list.sort(compareAnnouncementsDesc);
 
     return list;
   }
@@ -280,18 +305,8 @@ class AnnouncementService {
         );
       }
 
-      list.sort((a, b) => {
-        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
-        const priorityWeight: Record<ReportPriority, number> = {
-          critical: 4,
-          high: 3,
-          medium: 2,
-          low: 1,
-        };
-        const diff = priorityWeight[b.priority] - priorityWeight[a.priority];
-        if (diff !== 0) return diff;
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-      });
+      // Sort chronologically in descending order: newest timestamp -> oldest timestamp (LATEST -> OLDEST)
+      list.sort(compareAnnouncementsDesc);
 
       return list;
     };
