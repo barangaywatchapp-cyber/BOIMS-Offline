@@ -10,6 +10,7 @@ import { announcementService } from '../services/announcementService';
 import { notificationService } from '../services/notificationService';
 import { storageService } from '../services/storageService';
 import { isResidentMode, canCreateAnnouncements } from '../utils/permissions';
+import { isAppOnline } from '../offline/networkManager';
 import {
   Announcement,
   AnnouncementCategory,
@@ -91,6 +92,7 @@ export const AnnouncementsListPage: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [offlineNotice, setOfflineNotice] = useState<string | null>(null);
 
   const isResident = isResidentMode(user, role);
   const canPost = canCreateAnnouncements(role);
@@ -177,9 +179,9 @@ export const AnnouncementsListPage: React.FC = () => {
     setFormError(null);
 
     try {
-      let coverImageUrl = imagePreview || '';
+      let coverImageUrl = '';
 
-      // Create initial announcement
+      // Create initial announcement (offline-safe)
       const created = await announcementService.createAnnouncement({
         title,
         content,
@@ -192,35 +194,63 @@ export const AnnouncementsListPage: React.FC = () => {
         createdBy: user?.uid || 'system',
       });
 
-      // Upload cover image if selected
+      // Optimistically update list in UI
+      setBaseAnnouncements((prev) => {
+        const exists = prev.some((a) => a.announcementId === created.announcementId);
+        if (exists) {
+          return prev.map((a) => (a.announcementId === created.announcementId ? created : a));
+        }
+        return [created, ...prev];
+      });
+
+      // Handle image upload with offline safety
       if (imageFile) {
-        coverImageUrl = await storageService.uploadAnnouncementImage(
-          imageFile,
-          created.announcementId,
-          (progress) => setUploadProgress(progress)
-        );
-        await announcementService.updateAnnouncement(
-          created.announcementId,
-          { coverImage: coverImageUrl },
-          user?.uid || 'system'
-        );
+        if (!isAppOnline()) {
+          console.warn('[AnnouncementsListPage] Offline: skipping image upload, queuing text announcement.');
+          setOfflineNotice('Announcement saved to offline queue. Cover image upload was skipped because an active connection is required.');
+          setTimeout(() => setOfflineNotice(null), 8000);
+        } else {
+          try {
+            coverImageUrl = await storageService.uploadAnnouncementImage(
+              imageFile,
+              created.announcementId,
+              (progress) => setUploadProgress(progress)
+            );
+            if (coverImageUrl) {
+              const updated = await announcementService.updateAnnouncement(
+                created.announcementId,
+                { coverImage: coverImageUrl },
+                user?.uid || 'system'
+              );
+              setBaseAnnouncements((prev) =>
+                prev.map((a) => (a.announcementId === updated.announcementId ? updated : a))
+              );
+            }
+          } catch (storageErr) {
+            console.warn('[AnnouncementsListPage] Failed to upload image, announcement text preserved:', storageErr);
+          }
+        }
       }
 
-      // If emergency / critical, broadcast push notification alert to residents
+      // If emergency / critical, broadcast push notification alert to residents (offline-safe)
       if (priority === 'critical' || priority === 'high' || category === 'emergency') {
-        await notificationService.createNotification({
-          userId: 'all_residents',
-          title: `🚨 EMERGENCY BROADCAST: ${title}`,
-          message: content.substring(0, 150) + '...',
-          type: 'emergency',
-          priority: priority,
-          link: '/announcements',
-          announcementId: created.announcementId,
-          createdBy: user?.uid,
-        });
+        try {
+          await notificationService.createNotification({
+            userId: 'all_residents',
+            title: `🚨 EMERGENCY BROADCAST: ${title}`,
+            message: content.substring(0, 150) + '...',
+            type: 'emergency',
+            priority: priority,
+            link: '/announcements',
+            announcementId: created.announcementId,
+            createdBy: user?.uid,
+          });
+        } catch (notifErr) {
+          console.warn('[AnnouncementsListPage] Non-blocking notification broadcast error:', notifErr);
+        }
       }
 
-      // Reset form & reload
+      // Reset form & close modal
       setTitle('');
       setContent('');
       setCategory('general');
@@ -241,10 +271,14 @@ export const AnnouncementsListPage: React.FC = () => {
 
   const handleTogglePin = async (announcement: Announcement) => {
     if (!canPost) return;
+    const newPinned = !announcement.isPinned;
+    setBaseAnnouncements((prev) =>
+      prev.map((a) => (a.announcementId === announcement.announcementId ? { ...a, isPinned: newPinned } : a))
+    );
     try {
       await announcementService.togglePinAnnouncement(
         announcement.announcementId,
-        !announcement.isPinned,
+        newPinned,
         user?.uid || 'system'
       );
     } catch (err) {
@@ -255,6 +289,7 @@ export const AnnouncementsListPage: React.FC = () => {
   const handleDelete = async (announcementId: string) => {
     if (!canPost) return;
     if (!window.confirm('Are you sure you want to delete this announcement?')) return;
+    setBaseAnnouncements((prev) => prev.filter((a) => a.announcementId !== announcementId));
     try {
       await announcementService.deleteAnnouncement(announcementId, user?.uid || 'system');
     } catch (err) {
@@ -300,6 +335,23 @@ export const AnnouncementsListPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Offline Notice Banner */}
+      {offlineNotice && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-2xl flex items-center justify-between text-xs font-semibold shadow-2xs">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>{offlineNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setOfflineNotice(null)}
+            className="text-amber-600 hover:text-amber-800 p-1 rounded-lg cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Critical Emergency Banner (If active emergency advisory exists) */}
       {criticalEmergency && (
@@ -674,6 +726,14 @@ export const AnnouncementsListPage: React.FC = () => {
                     </div>
                   )}
                 </div>
+                {!isAppOnline() && imageFile && (
+                  <div className="mt-2.5 p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs font-semibold flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>
+                      Offline Note: Cover image upload requires an active internet connection. The announcement text will be saved and queued for sync immediately, but the image will not be uploaded.
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Pin Toggle */}

@@ -35,6 +35,7 @@ import { notificationService } from './notificationService';
 import { adminService } from './adminService';
 import { APP_METADATA } from '../constants';
 import { isResidentMode, canCreateAnnouncements } from '../utils/permissions';
+import { isAppOnline } from '../offline/networkManager';
 
 const COLLECTION_NAME = 'announcements';
 
@@ -89,49 +90,69 @@ class AnnouncementService {
   }): Promise<Announcement[]> {
     let list: Announcement[] = [];
 
-    try {
-      const colRef = collection(db, COLLECTION_NAME);
-      const q = query(colRef, where('isDeleted', '==', false));
-      const snapshot = await getDocs(q);
-
-      if (!snapshot.empty) {
-        list = snapshot.docs.map((doc) => doc.data() as Announcement);
-        // Merge with local announcements
-        const map = new Map<string, Announcement>();
-        this.localAnnouncements.forEach((a) => map.set(a.announcementId, a));
-        list.forEach((a) => map.set(a.announcementId, a));
-        this.localAnnouncements = Array.from(map.values());
-
-        // Refresh Phase 2 IndexedDB offline cache asynchronously
-        offlineStorage
-          .putCachedEntities(
-            COLLECTION_NAME,
-            list.map((item) => ({
-              recordId: item.announcementId,
-              data: item,
-              updatedAt: item.updatedAt || item.createdAt,
-            }))
-          )
-          .catch((err) => {
-            console.warn('[AnnouncementService] Failed to update offline entity cache:', err);
-          });
-      } else {
-        list = [...this.localAnnouncements];
-      }
-    } catch (error) {
-      console.warn('[AnnouncementService] Remote read failed, checking IndexedDB cache:', error);
+    if (!isAppOnline()) {
       try {
         const cached = await offlineStorage.getCachedEntities<Announcement>(COLLECTION_NAME);
-        if (cached.length > 0) {
+        const map = new Map<string, Announcement>();
+        cached.forEach((c) => {
+          if (c.data && c.data.announcementId) {
+            map.set(c.data.announcementId, c.data);
+          }
+        });
+        this.localAnnouncements.forEach((a) => {
+          if (a && a.announcementId) {
+            map.set(a.announcementId, a);
+          }
+        });
+        list = Array.from(map.values());
+      } catch {
+        list = [...this.localAnnouncements];
+      }
+    } else {
+      try {
+        const colRef = collection(db, COLLECTION_NAME);
+        const q = query(colRef, where('isDeleted', '==', false));
+        const snapshot = await getDocs(q);
+
+        if (!snapshot.empty) {
+          list = snapshot.docs.map((doc) => doc.data() as Announcement);
+          // Merge with local announcements
           const map = new Map<string, Announcement>();
           this.localAnnouncements.forEach((a) => map.set(a.announcementId, a));
-          cached.forEach((c) => map.set(c.data.announcementId, c.data));
-          list = Array.from(map.values());
+          list.forEach((a) => map.set(a.announcementId, a));
+          this.localAnnouncements = Array.from(map.values());
+
+          // Refresh Phase 2 IndexedDB offline cache asynchronously
+          offlineStorage
+            .putCachedEntities(
+              COLLECTION_NAME,
+              list.map((item) => ({
+                recordId: item.announcementId,
+                data: item,
+                updatedAt: item.updatedAt || item.createdAt,
+              }))
+            )
+            .catch((err) => {
+              console.warn('[AnnouncementService] Failed to update offline entity cache:', err);
+            });
         } else {
           list = [...this.localAnnouncements];
         }
-      } catch {
-        list = [...this.localAnnouncements];
+      } catch (error) {
+        console.warn('[AnnouncementService] Remote read failed, checking IndexedDB cache:', error);
+        try {
+          const cached = await offlineStorage.getCachedEntities<Announcement>(COLLECTION_NAME);
+          if (cached.length > 0) {
+            const map = new Map<string, Announcement>();
+            this.localAnnouncements.forEach((a) => map.set(a.announcementId, a));
+            cached.forEach((c) => map.set(c.data.announcementId, c.data));
+            list = Array.from(map.values());
+          } else {
+            list = [...this.localAnnouncements];
+          }
+        } catch {
+          list = [...this.localAnnouncements];
+        }
       }
     }
 
@@ -300,6 +321,21 @@ class AnnouncementService {
    * Get single announcement by ID
    */
   async getAnnouncementById(announcementId: string): Promise<Announcement | null> {
+    if (!isAppOnline()) {
+      try {
+        const cached = await offlineStorage.getCachedEntity<Announcement>(
+          COLLECTION_NAME,
+          announcementId
+        );
+        if (cached?.data) {
+          return cached.data;
+        }
+      } catch {
+        // ignore and check memory
+      }
+      return this.localAnnouncements.find((a) => a.announcementId === announcementId) || null;
+    }
+
     try {
       const docRef = doc(db, COLLECTION_NAME, announcementId);
       const snapshot = await getDoc(docRef);
@@ -375,7 +411,68 @@ class AnnouncementService {
       isDeleted: false,
     };
 
-    // Save to Firestore & Offline Queue
+    // Update local cache
+    this.localAnnouncements.unshift(newAnnouncement);
+
+    // Persist to offline entity cache in IndexedDB
+    await offlineStorage
+      .putCachedEntity(COLLECTION_NAME, id, newAnnouncement, {
+        updatedAt: now,
+      })
+      .catch((err) => {
+        console.warn('[AnnouncementService] Failed to cache announcement locally:', err);
+      });
+
+    // Offline path: immediately enqueue mutation to SyncService and return without calling Firestore
+    if (!isAppOnline()) {
+      syncService.enqueue('create', COLLECTION_NAME, id, newAnnouncement);
+
+      // Audit trail logging (non-blocking)
+      adminService
+        .logAuditEvent({
+          action: 'ANNOUNCEMENT_CREATED',
+          module: 'Announcements',
+          targetId: id,
+          targetType: 'Announcement',
+          performedBy: data.createdBy,
+          performerRole: session?.role || 'secretary',
+          newValues: { title: data.title, category: data.category, priority: data.priority },
+        })
+        .catch((err) => console.warn('[AnnouncementService] Audit log error:', err));
+
+      // Automatically generate notification broadcast for published announcements (offline-safe)
+      if (newAnnouncement.status === 'published') {
+        const notifTitle =
+          newAnnouncement.priority === 'critical' || newAnnouncement.category === 'emergency'
+            ? `🚨 EMERGENCY BROADCAST: ${newAnnouncement.title}`
+            : `📢 ANNOUNCEMENT: ${newAnnouncement.title}`;
+
+        notificationService
+          .createNotification({
+            userId: 'all_residents',
+            title: notifTitle,
+            message:
+              newAnnouncement.content.length > 150
+                ? newAnnouncement.content.substring(0, 150) + '...'
+                : newAnnouncement.content,
+            type:
+              newAnnouncement.priority === 'critical' || newAnnouncement.category === 'emergency'
+                ? 'emergency'
+                : 'announcement',
+            priority: newAnnouncement.priority,
+            link: '/announcements',
+            announcementId: newAnnouncement.announcementId,
+            createdBy: newAnnouncement.createdBy,
+          })
+          .catch((err) => {
+            console.warn('[AnnouncementService] Error creating notification for announcement:', err);
+          });
+      }
+
+      return newAnnouncement;
+    }
+
+    // Online path: attempt Firestore setDoc with fallback to offline sync queue on network failure
     try {
       const docRef = doc(db, COLLECTION_NAME, id);
       await setDoc(docRef, newAnnouncement);
@@ -393,9 +490,6 @@ class AnnouncementService {
         throw new Error('Permission denied creating announcement in Firestore.');
       }
     }
-
-    // Update local cache
-    this.localAnnouncements.unshift(newAnnouncement);
 
     // Audit trail logging (non-blocking)
     adminService
@@ -461,6 +555,40 @@ class AnnouncementService {
     const now = new Date().toISOString();
     const updatedData = { ...updates, updatedAt: now, updatedBy };
 
+    // Update local in-memory cache
+    const index = this.localAnnouncements.findIndex((a) => a.announcementId === announcementId);
+    if (index !== -1) {
+      this.localAnnouncements[index] = { ...this.localAnnouncements[index], ...updatedData };
+    }
+
+    const updatedEntity = index !== -1 ? this.localAnnouncements[index] : (updatedData as Announcement);
+    await offlineStorage
+      .putCachedEntity(COLLECTION_NAME, announcementId, updatedEntity, {
+        updatedAt: now,
+      })
+      .catch(() => {});
+
+    // Offline path: immediately enqueue update and return without Firestore updateDoc
+    if (!isAppOnline()) {
+      syncService.enqueue('update', COLLECTION_NAME, announcementId, updatedData);
+
+      // Audit trail logging (non-blocking)
+      adminService
+        .logAuditEvent({
+          action: 'ANNOUNCEMENT_UPDATED',
+          module: 'Announcements',
+          targetId: announcementId,
+          targetType: 'Announcement',
+          performedBy: updatedBy,
+          performerRole: session?.role || 'secretary',
+          newValues: updates,
+        })
+        .catch((err) => console.warn('[AnnouncementService] Audit log error:', err));
+
+      return updatedEntity;
+    }
+
+    // Online path: attempt updateDoc
     try {
       const docRef = doc(db, COLLECTION_NAME, announcementId);
       await updateDoc(docRef, updatedData);
@@ -477,12 +605,6 @@ class AnnouncementService {
         console.warn('[AnnouncementService] Permission denied updating announcement.');
         throw new Error('Permission denied updating announcement in Firestore.');
       }
-    }
-
-    // Update local cache
-    const index = this.localAnnouncements.findIndex((a) => a.announcementId === announcementId);
-    if (index !== -1) {
-      this.localAnnouncements[index] = { ...this.localAnnouncements[index], ...updatedData };
     }
 
     // Audit trail logging (non-blocking)
@@ -524,6 +646,35 @@ class AnnouncementService {
     const now = new Date().toISOString();
     const deletePayload = { isDeleted: true, deletedAt: now, deletedBy };
 
+    const index = this.localAnnouncements.findIndex((a) => a.announcementId === announcementId);
+    if (index !== -1) {
+      this.localAnnouncements[index].isDeleted = true;
+      await offlineStorage
+        .putCachedEntity(COLLECTION_NAME, announcementId, this.localAnnouncements[index], {
+          updatedAt: now,
+        })
+        .catch(() => {});
+    }
+
+    // Offline path: immediately enqueue delete and return without Firestore updateDoc
+    if (!isAppOnline()) {
+      syncService.enqueue('delete', COLLECTION_NAME, announcementId, deletePayload);
+
+      adminService
+        .logAuditEvent({
+          action: 'ANNOUNCEMENT_DELETED',
+          module: 'Announcements',
+          targetId: announcementId,
+          targetType: 'Announcement',
+          performedBy: deletedBy,
+          performerRole: session?.role || 'secretary',
+        })
+        .catch((err) => console.warn('[AnnouncementService] Audit log error:', err));
+
+      return;
+    }
+
+    // Online path: attempt updateDoc
     try {
       const docRef = doc(db, COLLECTION_NAME, announcementId);
       await updateDoc(docRef, deletePayload);
@@ -540,11 +691,6 @@ class AnnouncementService {
         console.warn('[AnnouncementService] Permission denied deleting announcement.');
         throw new Error('Permission denied deleting announcement in Firestore.');
       }
-    }
-
-    const index = this.localAnnouncements.findIndex((a) => a.announcementId === announcementId);
-    if (index !== -1) {
-      this.localAnnouncements[index].isDeleted = true;
     }
 
     // Audit trail logging (non-blocking)
