@@ -36,6 +36,7 @@ import {
 } from '../offline/types';
 import { syncQueueMigration, normalizeCollectionName } from '../offline/syncMigration';
 import { networkManager, isAppOnline } from '../offline/networkManager';
+export { isAppOnline };
 
 const MAX_RETRIES = 3;
 
@@ -180,6 +181,23 @@ class SyncService {
       }
     }
 
+    // Enforce strict authorization on inventory collection: Secretary & Chairman ONLY
+    if (normalizedCollection === 'inventory') {
+      const isAuthorized =
+        authorUser &&
+        (authorUser.role === 'secretary' ||
+          authorUser.role === 'chairman' ||
+          authorUser.role === 'admin' ||
+          authorUser.role === 'superAdmin');
+      if (!isAuthorized) {
+        const role = authorUser?.role || 'unauthenticated';
+        console.warn(`[SyncService] Refusing unauthorized mutation on inventory by role: ${role}`);
+        throw new Error(
+          `Unauthorized offline mutation: Role '${role}' is not permitted to perform '${operationType}' on collection 'inventory'. Only Secretary and Chairman are authorized.`
+        );
+      }
+    }
+
     const queueId = `MUT-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const now = new Date().toISOString();
 
@@ -192,6 +210,8 @@ class SyncService {
       timestamp: now,
       retryCount: 0,
       status: 'pending',
+      userId: authorUser?.uid,
+      authorRole: authorUser?.role,
     };
 
     // Optimistically update memory queue immediately for responsive UI

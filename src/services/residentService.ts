@@ -67,11 +67,23 @@ class ResidentService {
   private async initLocalCache(): Promise<void> {
     if (typeof localStorage !== 'undefined') {
       try {
-        const stored = localStorage.getItem(LOCAL_RESIDENTS_KEY);
-        if (stored) {
-          const parsed = JSON.parse(stored);
+        const storedResidents = localStorage.getItem(LOCAL_RESIDENTS_KEY);
+        if (storedResidents) {
+          const parsed = JSON.parse(storedResidents);
           if (Array.isArray(parsed) && parsed.length > 0) {
             this.memoryResidents = parsed;
+          }
+        }
+      } catch (err) {
+        // ignore
+      }
+
+      try {
+        const storedHouseholds = localStorage.getItem(LOCAL_HOUSEHOLDS_KEY);
+        if (storedHouseholds) {
+          const parsed = JSON.parse(storedHouseholds);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            this.memoryHouseholds = parsed;
           }
         }
       } catch (err) {
@@ -92,6 +104,25 @@ class ResidentService {
         this.memoryResidents = Array.from(map.values());
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(LOCAL_RESIDENTS_KEY, JSON.stringify(this.memoryResidents));
+        }
+      }
+    } catch {
+      // offline storage may initialize asynchronously
+    }
+
+    try {
+      const cachedHouseholds = await offlineStorage.getCachedEntities<Household>(HOUSEHOLDS_COLLECTION);
+      if (cachedHouseholds && cachedHouseholds.length > 0) {
+        const map = new Map<string, Household>();
+        this.memoryHouseholds.forEach((h) => map.set(h.householdId, h));
+        cachedHouseholds.forEach((c) => {
+          if (c.data && c.data.householdId) {
+            map.set(c.data.householdId, c.data);
+          }
+        });
+        this.memoryHouseholds = Array.from(map.values());
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(LOCAL_HOUSEHOLDS_KEY, JSON.stringify(this.memoryHouseholds));
         }
       }
     } catch {
@@ -130,14 +161,48 @@ class ResidentService {
         console.warn('[ResidentService] Failed to save residents to localStorage:', err);
       }
     }
+    data.forEach((r) => {
+      if (r.residentId) {
+        offlineStorage.putCachedEntity(RESIDENTS_COLLECTION, r.residentId, r).catch(() => {});
+      }
+    });
   }
 
   private getLocalHouseholds(): Household[] {
+    if (this.memoryHouseholds.length > 0) {
+      return this.memoryHouseholds;
+    }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem(LOCAL_HOUSEHOLDS_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            this.memoryHouseholds = parsed;
+            return this.memoryHouseholds;
+          }
+        }
+      } catch (err) {
+        console.warn('[ResidentService] Failed to read households from localStorage:', err);
+      }
+    }
     return this.memoryHouseholds;
   }
 
   private saveLocalHouseholds(data: Household[]): void {
     this.memoryHouseholds = data;
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(LOCAL_HOUSEHOLDS_KEY, JSON.stringify(data));
+      } catch (err) {
+        console.warn('[ResidentService] Failed to save households to localStorage:', err);
+      }
+    }
+    data.forEach((h) => {
+      if (h.householdId) {
+        offlineStorage.putCachedEntity(HOUSEHOLDS_COLLECTION, h.householdId, h).catch(() => {});
+      }
+    });
   }
 
   /**
@@ -702,6 +767,35 @@ class ResidentService {
       return () => {};
     }
 
+    // Immediately deliver cached households so UI renders without delay
+    const initialLocals = this.getLocalHouseholds().filter((h) => !h.isDeleted);
+    if (initialLocals.length > 0) {
+      const filtered = userObj ? filterHouseholdsByAccess(initialLocals, userObj) : initialLocals;
+      callback(filtered);
+    }
+
+    if (!isAppOnline()) {
+      if (initialLocals.length === 0) {
+        offlineStorage
+          .getCachedEntities<Household>(HOUSEHOLDS_COLLECTION)
+          .then((cached) => {
+            if (cached && cached.length > 0) {
+              let idbLocals = cached.map((c) => c.data).filter((h): h is Household => Boolean(h && !h.isDeleted));
+              this.saveLocalHouseholds(idbLocals);
+              if (userObj) {
+                idbLocals = filterHouseholdsByAccess(idbLocals, userObj);
+              }
+              if (filters?.purok && filters.purok !== 'all') {
+                idbLocals = idbLocals.filter((h) => h.purok === filters.purok);
+              }
+              callback(idbLocals);
+            }
+          })
+          .catch(() => {});
+      }
+      return () => {};
+    }
+
     const activeRole = userObj?.role || null;
     const isResidentRole = isResidentMode(userObj, activeRole);
 
@@ -870,15 +964,28 @@ class ResidentService {
       }
     }
 
-    if (!auth.currentUser) {
-      // Unauthenticated user: do NOT query Firestore. Return local cache.
-      households = this.getLocalHouseholds();
+    if (!isAppOnline() || !auth.currentUser) {
+      // Offline or unauthenticated user: do NOT query Firestore. Return local cache immediately.
+      let locals = this.getLocalHouseholds();
+      if (locals.length === 0) {
+        try {
+          const cached = await offlineStorage.getCachedEntities<Household>(HOUSEHOLDS_COLLECTION);
+          if (cached && cached.length > 0) {
+            locals = cached.map((c) => c.data).filter((h): h is Household => Boolean(h && !h.isDeleted));
+            this.saveLocalHouseholds(locals);
+          }
+        } catch {}
+      }
+      households = locals;
       if (userObj) {
         households = filterHouseholdsByAccess(households, userObj);
       }
+      if (filters?.purok && filters.purok !== 'all') {
+        households = households.filter((h) => h.purok === filters.purok);
+      }
       return households
         .filter((h) => !h.isDeleted)
-        .sort((a, b) => a.householdNumber.localeCompare(b.householdNumber));
+        .sort((a, b) => (a.householdNumber || '').localeCompare(b.householdNumber || ''));
     }
 
     const activeRole = userObj?.role || null;
@@ -1094,18 +1201,37 @@ class ResidentService {
    * Get single household by ID
    */
   async getHouseholdById(householdId: string): Promise<Household | null> {
+    const locals = this.getLocalHouseholds();
+    const memoryMatch = locals.find((h) => h.householdId === householdId);
+    if (memoryMatch) return memoryMatch;
+
+    try {
+      const cached = await offlineStorage.getCachedEntity<Household>(HOUSEHOLDS_COLLECTION, householdId);
+      if (cached && cached.data) {
+        const updatedLocals = [cached.data, ...locals.filter((h) => h.householdId !== householdId)];
+        this.saveLocalHouseholds(updatedLocals);
+        return cached.data;
+      }
+    } catch {}
+
+    if (!isAppOnline()) {
+      return null;
+    }
+
     try {
       const docRef = doc(db, HOUSEHOLDS_COLLECTION, householdId);
       const snap = await getDoc(docRef);
       if (snap.exists()) {
-        return { householdId: snap.id, ...snap.data() } as Household;
+        const hh = { householdId: snap.id, ...snap.data() } as Household;
+        const updatedLocals = [hh, ...locals.filter((h) => h.householdId !== householdId)];
+        this.saveLocalHouseholds(updatedLocals);
+        return hh;
       }
     } catch (err) {
       console.warn('[ResidentService] Offline fallback for getHouseholdById:', err);
     }
 
-    const locals = this.getLocalHouseholds();
-    return locals.find((h) => h.householdId === householdId) || null;
+    return null;
   }
 
   /**
@@ -1198,6 +1324,14 @@ class ResidentService {
     const locals = this.getLocalHouseholds();
     locals.unshift(newHousehold);
     this.saveLocalHouseholds(locals);
+    await offlineStorage.putCachedEntity(HOUSEHOLDS_COLLECTION, id, newHousehold, { updatedAt: now }).catch(() => {});
+
+    const authorUser = { uid: createdBy, role: userRole || 'resident', fullName: performerName || data.householdHeadName } as any;
+
+    if (!isAppOnline()) {
+      syncService.enqueue('create', HOUSEHOLDS_COLLECTION, id, firestoreData, authorUser);
+      return newHousehold;
+    }
 
     try {
       const docRef = doc(db, HOUSEHOLDS_COLLECTION, id);
@@ -1221,7 +1355,7 @@ class ResidentService {
       }
     } catch (error) {
       console.warn('[ResidentService] Queueing offline create household:', error);
-      syncService.enqueue('create', HOUSEHOLDS_COLLECTION, id, firestoreData);
+      syncService.enqueue('create', HOUSEHOLDS_COLLECTION, id, firestoreData, authorUser);
     }
 
     // Audit Log Entry
@@ -1282,13 +1416,21 @@ class ResidentService {
       const idx = locals.findIndex((h) => h.householdId === householdId);
       if (idx !== -1) locals[idx] = updatedHousehold;
       this.saveLocalHouseholds(locals);
+      await offlineStorage.putCachedEntity(HOUSEHOLDS_COLLECTION, householdId, updatedHousehold, { updatedAt: now }).catch(() => {});
+
+      const authorUser = { uid: updatedBy, role: userRole || 'resident', fullName: performerName || 'Resident' } as any;
+
+      if (!isAppOnline()) {
+        syncService.enqueue('update', HOUSEHOLDS_COLLECTION, householdId, { pendingChangeRequest, updatedAt: now, updatedBy }, authorUser);
+        return updatedHousehold;
+      }
 
       try {
         const docRef = doc(db, HOUSEHOLDS_COLLECTION, householdId);
         await updateDoc(docRef, { pendingChangeRequest, updatedAt: now, updatedBy });
       } catch (error) {
         console.warn('[ResidentService] Queueing offline change request update:', error);
-        syncService.enqueue('update', HOUSEHOLDS_COLLECTION, householdId, { pendingChangeRequest, updatedAt: now, updatedBy });
+        syncService.enqueue('update', HOUSEHOLDS_COLLECTION, householdId, { pendingChangeRequest, updatedAt: now, updatedBy }, authorUser);
       }
 
       // Audit Log Entry
@@ -1323,6 +1465,14 @@ class ResidentService {
       locals.unshift(updated);
     }
     this.saveLocalHouseholds(locals);
+    await offlineStorage.putCachedEntity(HOUSEHOLDS_COLLECTION, householdId, updated, { updatedAt: now }).catch(() => {});
+
+    const authorUser = { uid: updatedBy, role: userRole || 'resident', fullName: performerName || 'User' } as any;
+
+    if (!isAppOnline()) {
+      syncService.enqueue('update', HOUSEHOLDS_COLLECTION, householdId, { ...updates, updatedAt: now, updatedBy }, authorUser);
+      return updated;
+    }
 
     try {
       const docRef = doc(db, HOUSEHOLDS_COLLECTION, householdId);
@@ -1333,7 +1483,7 @@ class ResidentService {
       }
     } catch (error) {
       console.warn('[ResidentService] Queueing offline update household:', error);
-      syncService.enqueue('update', HOUSEHOLDS_COLLECTION, householdId, { ...updates, updatedAt: now, updatedBy });
+      syncService.enqueue('update', HOUSEHOLDS_COLLECTION, householdId, { ...updates, updatedAt: now, updatedBy }, authorUser);
     }
 
     // Audit Log Entry

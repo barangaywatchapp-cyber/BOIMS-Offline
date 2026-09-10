@@ -126,6 +126,8 @@ export class OfflineMutationQueue {
       retryCount: mutation.retryCount,
       status: mutation.status,
       baseUpdatedAt: mutation.baseUpdatedAt,
+      userId: mutation.userId,
+      userRole: mutation.userRole,
     });
 
     // 5. Apply local optimistic state to offlineEntities cache if requested

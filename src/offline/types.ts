@@ -432,6 +432,7 @@ export const OFFLINE_MUTABLE_COLLECTIONS = [
   'blotterCases',
   'inventory',
   'residents',
+  'households',
 ] as const;
 
 export type OfflineMutableCollection =
@@ -637,7 +638,13 @@ export function isMutationAuthorized(
       return role === 'secretary';
 
     case 'inventory':
-      return role === 'secretary';
+      return role === 'secretary' || role === 'chairman';
+
+    case 'households':
+      // Authenticated users (residents and officials) can create and update their household records
+      if (operation === 'create' || operation === 'update') return true;
+      if (operation === 'delete') return role === 'secretary' || role === 'chairman';
+      return false;
 
     default:
       return false;

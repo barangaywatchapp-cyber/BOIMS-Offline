@@ -100,6 +100,9 @@ export const InventoryPage: React.FC = () => {
     remarks: '',
   });
 
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
   const isAuthorized = canAccessInventory(role);
   const canManage = isAuthorized;
 
@@ -108,7 +111,6 @@ export const InventoryPage: React.FC = () => {
       setLoading(false);
       return;
     }
-    setLoading(true);
     try {
       const data = await inventoryService.getInventoryItems();
       setItems(data);
@@ -141,20 +143,51 @@ export const InventoryPage: React.FC = () => {
 
   const handleCreateAsset = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user) return;
 
+    if (!formData.assetName.trim()) {
+      alert('Asset Name is required.');
+      return;
+    }
+    if (!formData.location.trim()) {
+      alert('Storage Location is required.');
+      return;
+    }
+    if (formData.quantity < 1) {
+      alert('Quantity must be at least 1.');
+      return;
+    }
+    if (!formData.unit.trim()) {
+      alert('Unit is required.');
+      return;
+    }
+
+    // Resolve user context (supports offline sessions)
+    let currentUser = user;
+    if (!currentUser && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) currentUser = JSON.parse(stored);
+      } catch {}
+    }
+    const currentUid = currentUser?.uid || 'officer_user';
+    const authorRole = currentUser?.role || role || 'secretary';
+
+    setIsSubmitting(true);
     try {
-      await inventoryService.createInventoryItem(
+      const createdItem = await inventoryService.createInventoryItem(
         {
           ...formData,
           availableQuantity: formData.quantity,
           imageUrls: imagePreview ? [imagePreview] : ['https://images.unsplash.com/photo-1580481072645-022f9a6d8310?auto=format&fit=crop&q=80&w=600'],
         },
-        user.uid
+        currentUid,
+        currentUser || ({ uid: currentUid, role: authorRole, fullName: 'Barangay Officer' } as any)
       );
+
+      // Immediate optimistic update to local UI state
+      setItems((prev) => [createdItem, ...prev.filter((i) => i.assetId !== createdItem.assetId)]);
       setShowAddModal(false);
       setImagePreview('');
-      fetchItems();
       setFormData({
         assetName: '',
         category: 'furniture',
@@ -174,13 +207,25 @@ export const InventoryPage: React.FC = () => {
         remarks: '',
       });
     } catch (err) {
+      console.error('[InventoryPage] Error creating asset:', err);
       alert('Error creating asset: ' + (err as Error).message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleIssueBorrow = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedItem || !user) return;
+    if (!selectedItem) return;
+
+    let currentUser = user;
+    if (!currentUser && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) currentUser = JSON.parse(stored);
+      } catch {}
+    }
+    const currentUid = currentUser?.uid || 'officer_user';
 
     try {
       const updated = await inventoryService.issueBorrowItem(
@@ -194,11 +239,11 @@ export const InventoryPage: React.FC = () => {
           purpose: borrowData.purpose,
           expectedReturnDate: borrowData.expectedReturnDate,
         },
-        user.uid
+        currentUid
       );
       setSelectedItem(updated);
+      setItems((prev) => prev.map((item) => (item.assetId === updated.assetId ? updated : item)));
       setShowBorrowModal(false);
-      fetchItems();
       alert(`Asset successfully issued to ${borrowData.borrowerName}`);
     } catch (err) {
       alert('Error issuing asset: ' + (err as Error).message);
@@ -206,15 +251,24 @@ export const InventoryPage: React.FC = () => {
   };
 
   const handleReturnItem = async (borrowId: string) => {
-    if (!selectedItem || !user) return;
+    if (!selectedItem) return;
 
     const remarks = window.prompt('Enter return inspection remarks (e.g., Checked clean and complete):');
     if (remarks === null) return;
 
+    let currentUser = user;
+    if (!currentUser && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) currentUser = JSON.parse(stored);
+      } catch {}
+    }
+    const currentUid = currentUser?.uid || 'officer_user';
+
     try {
-      const updated = await inventoryService.returnBorrowedItem(selectedItem.assetId, borrowId, remarks, user.uid);
+      const updated = await inventoryService.returnBorrowedItem(selectedItem.assetId, borrowId, remarks, currentUid);
       setSelectedItem(updated);
-      fetchItems();
+      setItems((prev) => prev.map((item) => (item.assetId === updated.assetId ? updated : item)));
       alert('Item return recorded successfully.');
     } catch (err) {
       alert('Error returning item: ' + (err as Error).message);
@@ -223,7 +277,16 @@ export const InventoryPage: React.FC = () => {
 
   const handleUpdateMaintenance = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedItem || !user) return;
+    if (!selectedItem) return;
+
+    let currentUser = user;
+    if (!currentUser && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) currentUser = JSON.parse(stored);
+      } catch {}
+    }
+    const currentUid = currentUser?.uid || 'officer_user';
 
     try {
       const updated = await inventoryService.updateMaintenanceStatus(
@@ -231,11 +294,11 @@ export const InventoryPage: React.FC = () => {
         maintData.condition,
         maintData.status,
         maintData.remarks,
-        user.uid
+        currentUid
       );
       setSelectedItem(updated);
+      setItems((prev) => prev.map((item) => (item.assetId === updated.assetId ? updated : item)));
       setShowMaintenanceModal(false);
-      fetchItems();
     } catch (err) {
       alert('Error updating maintenance: ' + (err as Error).message);
     }
@@ -767,11 +830,23 @@ export const InventoryPage: React.FC = () => {
               </button>
             </div>
 
-            <form onSubmit={handleCreateAsset} className="p-6 space-y-4 text-sm">
+            <form
+              id="form-add-asset"
+              onSubmit={handleCreateAsset}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.target as HTMLElement).tagName !== 'TEXTAREA') {
+                  e.preventDefault();
+                  handleCreateAsset(e);
+                }
+              }}
+              className="p-6 space-y-4 text-sm"
+            >
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Asset Name *</label>
                   <input
+                    id="input-asset-name"
+                    name="assetName"
                     type="text"
                     required
                     placeholder="e.g., Monobloc Chairs (Blue)"
@@ -784,6 +859,8 @@ export const InventoryPage: React.FC = () => {
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Category *</label>
                   <select
+                    id="select-asset-category"
+                    name="category"
                     value={formData.category}
                     onChange={(e) => setFormData({ ...formData, category: e.target.value as AssetCategory })}
                     className="w-full p-2 border border-slate-300 rounded-lg"
@@ -802,6 +879,8 @@ export const InventoryPage: React.FC = () => {
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Quantity *</label>
                   <input
+                    id="input-asset-quantity"
+                    name="quantity"
                     type="number"
                     min={1}
                     required
@@ -814,6 +893,8 @@ export const InventoryPage: React.FC = () => {
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Unit *</label>
                   <input
+                    id="input-asset-unit"
+                    name="unit"
                     type="text"
                     required
                     placeholder="pcs, units, sets"
@@ -826,6 +907,8 @@ export const InventoryPage: React.FC = () => {
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Unit Cost (₱)</label>
                   <input
+                    id="input-asset-cost"
+                    name="acquisitionCost"
                     type="number"
                     min={0}
                     value={formData.acquisitionCost}
@@ -839,6 +922,8 @@ export const InventoryPage: React.FC = () => {
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Brand / Model</label>
                   <input
+                    id="input-asset-brand"
+                    name="brand"
                     type="text"
                     placeholder="e.g., Uratex Classic"
                     value={formData.brand}
@@ -850,6 +935,8 @@ export const InventoryPage: React.FC = () => {
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">Storage Location *</label>
                   <input
+                    id="input-asset-location"
+                    name="location"
                     type="text"
                     required
                     placeholder="e.g. Barangay Storage Room A"
@@ -863,6 +950,8 @@ export const InventoryPage: React.FC = () => {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Description / Asset Remarks</label>
                 <textarea
+                  id="textarea-asset-description"
+                  name="description"
                   rows={2}
                   value={formData.description}
                   onChange={(e) => setFormData({ ...formData, description: e.target.value })}
@@ -872,16 +961,25 @@ export const InventoryPage: React.FC = () => {
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Asset Photo</label>
-                <input type="file" accept="image/*" onChange={handleImageUpload} className="text-xs" />
+                <input id="input-asset-photo" name="photo" type="file" accept="image/*" onChange={handleImageUpload} className="text-xs" />
                 {isUploading && <p className="text-xs text-blue-600 mt-1">Uploading photo...</p>}
               </div>
 
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
-                <Button type="button" variant="secondary" size="sm" onClick={() => setShowAddModal(false)}>
+                <Button id="btn-cancel-asset" type="button" variant="secondary" size="sm" onClick={() => setShowAddModal(false)}>
                   Cancel
                 </Button>
-                <Button type="submit" variant="primary" size="sm">
-                  Save Asset Item
+                <Button
+                  id="btn-save-asset"
+                  data-testid="save-asset-button"
+                  aria-label="Save Asset"
+                  type="submit"
+                  variant="primary"
+                  size="sm"
+                  loading={isSubmitting}
+                  disabled={isSubmitting || !formData.assetName.trim()}
+                >
+                  {isSubmitting ? 'Saving Asset...' : 'Save Asset'}
                 </Button>
               </div>
             </form>

@@ -14,20 +14,22 @@ import {
   updateDoc,
   query,
   where,
-  orderBy,
   limit,
   startAfter,
   QueryConstraint,
   DocumentSnapshot,
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
+import { isAppOnline } from '../offline/networkManager';
 import { syncService } from './SyncService';
+import { offlineStorage } from '../offline/storage';
 import { adminService } from './adminService';
 import {
   InventoryItem,
   InventoryBorrowRecord,
   AssetCondition,
   AssetStatus,
+  User,
 } from '../types';
 
 const INVENTORY_COLLECTION = 'inventory';
@@ -36,18 +38,107 @@ const LOCAL_STORAGE_KEY = 'boims_offline_inventory_v1';
 class InventoryService {
   private memoryCache: InventoryItem[] = [];
 
+  constructor() {
+    this.initCache();
+  }
+
+  private initCache(): void {
+    if (typeof window === 'undefined') return;
+    try {
+      const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (stored) {
+        this.memoryCache = JSON.parse(stored);
+      }
+    } catch (e) {
+      console.warn('[InventoryService] Error reading inventory from localStorage:', e);
+    }
+
+    // Async hydration from IndexedDB offlineEntities
+    offlineStorage
+      .getCachedEntities<InventoryItem>(INVENTORY_COLLECTION)
+      .then((entities) => {
+        if (entities && entities.length > 0) {
+          const idbItems = entities
+            .map((e) => e.data)
+            .filter((item): item is InventoryItem => Boolean(item && !item.isDeleted));
+          if (idbItems.length > 0) {
+            const map = new Map<string, InventoryItem>();
+            for (const item of this.memoryCache) {
+              map.set(item.assetId, item);
+            }
+            for (const item of idbItems) {
+              map.set(item.assetId, item);
+            }
+            this.memoryCache = Array.from(map.values());
+            try {
+              localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(this.memoryCache));
+            } catch {}
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('[InventoryService] Hydration from IndexedDB error:', err);
+      });
+  }
+
   private getLocalCache(): InventoryItem[] {
+    if (this.memoryCache.length === 0 && typeof window !== 'undefined') {
+      try {
+        const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+        if (stored) {
+          this.memoryCache = JSON.parse(stored);
+        }
+      } catch (e) {
+        console.warn('[InventoryService] Error parsing localStorage:', e);
+      }
+    }
     return this.memoryCache;
   }
 
   private setLocalCache(data: InventoryItem[]): void {
     this.memoryCache = data;
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
+      } catch (e) {
+        console.warn('[InventoryService] Error saving to localStorage:', e);
+      }
+    }
+    // Asynchronously update IndexedDB
+    data.forEach((item) => {
+      offlineStorage.putCachedEntity(INVENTORY_COLLECTION, item.assetId, item).catch(() => {});
+    });
   }
 
   /**
    * Fetch non-deleted inventory items with optional pagination
    */
   async getInventoryItems(options?: { limitCount?: number; lastDoc?: DocumentSnapshot | null }): Promise<InventoryItem[]> {
+    // If cache is empty, hydrate from IndexedDB first (essential for cold-offline boot)
+    if (this.memoryCache.length === 0) {
+      try {
+        const entities = await offlineStorage.getCachedEntities<InventoryItem>(INVENTORY_COLLECTION);
+        if (entities && entities.length > 0) {
+          const idbItems = entities
+            .map((e) => e.data)
+            .filter((item): item is InventoryItem => Boolean(item && !item.isDeleted));
+          if (idbItems.length > 0) {
+            this.memoryCache = idbItems;
+            try {
+              localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(idbItems));
+            } catch {}
+          }
+        }
+      } catch (err) {
+        console.warn('[InventoryService] Error loading cached entities from IndexedDB:', err);
+      }
+    }
+
+    // If offline, return immediately from local cache without attempting network
+    if (!isAppOnline()) {
+      return this.getLocalCache().filter((item) => !item.isDeleted);
+    }
+
     try {
       const constraints: QueryConstraint[] = [where('isDeleted', '==', false)];
 
@@ -93,17 +184,40 @@ class InventoryService {
    * Get single inventory item by assetId or assetCode or qrCode
    */
   async getInventoryById(idOrCode: string): Promise<InventoryItem | null> {
-    const items = await this.getInventoryItems();
-    return (
-      items.find(
-        (item) =>
-          (item.assetId === idOrCode ||
-            item.assetCode === idOrCode ||
-            item.qrCode === idOrCode ||
-            item.barcode === idOrCode) &&
-          !item.isDeleted
-      ) || null
+    const cached = this.getLocalCache().find(
+      (item) =>
+        (item.assetId === idOrCode ||
+          item.assetCode === idOrCode ||
+          item.qrCode === idOrCode ||
+          item.barcode === idOrCode) &&
+        !item.isDeleted
     );
+    if (cached) return cached;
+
+    // Check IndexedDB
+    try {
+      const idbEntity = await offlineStorage.getCachedEntity<InventoryItem>(INVENTORY_COLLECTION, idOrCode);
+      if (idbEntity?.data && !idbEntity.data.isDeleted) {
+        return idbEntity.data;
+      }
+    } catch {}
+
+    if (isAppOnline()) {
+      try {
+        const docSnap = await getDoc(doc(db, INVENTORY_COLLECTION, idOrCode));
+        if (docSnap.exists()) {
+          const data = docSnap.data() as InventoryItem;
+          if (!data.isDeleted) {
+            this.setLocalCache([data, ...this.getLocalCache().filter((i) => i.assetId !== data.assetId)]);
+            return data;
+          }
+        }
+      } catch (err) {
+        console.warn('[InventoryService] Remote getDoc failed, item not found:', err);
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -111,9 +225,25 @@ class InventoryService {
    */
   async createInventoryItem(
     data: Omit<InventoryItem, 'assetId' | 'assetCode' | 'createdAt' | 'updatedAt' | 'isDeleted' | 'createdBy'>,
-    createdBy: string
+    createdBy: string,
+    authorUserContext?: User | null
   ): Promise<InventoryItem> {
-    const existing = await this.getInventoryItems();
+    // 1. Local Validation
+    if (!data.assetName || !data.assetName.trim()) {
+      throw new Error('Asset Name is required.');
+    }
+    if (!data.location || !data.location.trim()) {
+      throw new Error('Storage Location is required.');
+    }
+    if (!data.quantity || data.quantity < 1) {
+      throw new Error('Quantity must be at least 1.');
+    }
+    if (!data.unit || !data.unit.trim()) {
+      throw new Error('Unit is required.');
+    }
+
+    // 2. Determine sequential code from local cache (offline-safe, collision-resilient)
+    const existing = this.getLocalCache();
     const year = new Date().getFullYear();
     const prefix = `AST-${year}-`;
 
@@ -149,11 +279,30 @@ class InventoryService {
       isDeleted: false,
     };
 
+    // 3. Update local state and memory cache
     const cache = this.getLocalCache();
     cache.unshift(newItem);
     this.setLocalCache(cache);
 
-    // Audit trail logging (non-blocking)
+    // 4. Persist to IndexedDB immediately
+    await offlineStorage.putCachedEntity(INVENTORY_COLLECTION, assetId, newItem, { updatedAt: now }).catch(() => {});
+
+    // 5. Resolve author user context for queue authorization
+    let resolvedAuthor: User | null = authorUserContext || null;
+    if (!resolvedAuthor && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) resolvedAuthor = JSON.parse(stored);
+      } catch {}
+    }
+    if (!resolvedAuthor) {
+      resolvedAuthor = { uid: createdBy, role: 'secretary', fullName: 'Barangay Officer' } as any;
+    }
+
+    // 6. Enqueue mutation
+    syncService.enqueue('create', INVENTORY_COLLECTION, assetId, newItem, resolvedAuthor);
+
+    // 7. Non-blocking audit trail logging
     adminService
       .logAuditEvent({
         action: 'INVENTORY_ITEM_CREATED',
@@ -161,19 +310,20 @@ class InventoryService {
         targetId: assetId,
         targetType: 'InventoryItem',
         performedBy: createdBy,
-        performerRole: 'admin',
+        performerRole: resolvedAuthor.role || 'secretary',
         newValues: { assetName: newItem.assetName, category: newItem.category, quantity: newItem.quantity },
       })
       .catch((err) => console.warn('[InventoryService] Audit log error:', err));
 
-    try {
+    // 8. If online, fire-and-forget background sync (never blocks local completion)
+    if (isAppOnline()) {
       const docRef = doc(db, INVENTORY_COLLECTION, assetId);
-      await setDoc(docRef, newItem);
-    } catch (error) {
-      console.warn('[InventoryService] Firestore setDoc failed, queuing for offline sync:', error);
-      syncService.enqueue('create', INVENTORY_COLLECTION, assetId, newItem);
+      setDoc(docRef, newItem).catch((error) => {
+        console.warn('[InventoryService] Background Firestore setDoc failed (queued):', error);
+      });
     }
 
+    // 9. Return immediately
     return newItem;
   }
 
@@ -183,7 +333,8 @@ class InventoryService {
   async updateInventoryItem(
     assetId: string,
     updates: Partial<InventoryItem>,
-    updatedBy: string
+    updatedBy: string,
+    authorUserContext?: User | null
   ): Promise<InventoryItem> {
     const now = new Date().toISOString();
     const cache = this.getLocalCache();
@@ -203,6 +354,24 @@ class InventoryService {
     cache[index] = updatedItem;
     this.setLocalCache(cache);
 
+    // Persist to IndexedDB immediately
+    await offlineStorage.putCachedEntity(INVENTORY_COLLECTION, assetId, updatedItem, { updatedAt: now }).catch(() => {});
+
+    // Resolve author user context
+    let resolvedAuthor: User | null = authorUserContext || null;
+    if (!resolvedAuthor && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) resolvedAuthor = JSON.parse(stored);
+      } catch {}
+    }
+    if (!resolvedAuthor) {
+      resolvedAuthor = { uid: updatedBy, role: 'secretary', fullName: 'Barangay Officer' } as any;
+    }
+
+    // Enqueue mutation
+    syncService.enqueue('update', INVENTORY_COLLECTION, assetId, { ...updates, updatedAt: now, updatedBy }, resolvedAuthor);
+
     // Audit trail logging (non-blocking)
     adminService
       .logAuditEvent({
@@ -211,17 +380,17 @@ class InventoryService {
         targetId: assetId,
         targetType: 'InventoryItem',
         performedBy: updatedBy,
-        performerRole: 'admin',
+        performerRole: resolvedAuthor.role || 'secretary',
         newValues: updates,
       })
       .catch((err) => console.warn('[InventoryService] Audit log error:', err));
 
-    try {
+    // Non-blocking Firestore update if online
+    if (isAppOnline()) {
       const docRef = doc(db, INVENTORY_COLLECTION, assetId);
-      await updateDoc(docRef, { ...updates, updatedAt: now, updatedBy });
-    } catch (error) {
-      console.warn('[InventoryService] Firestore updateDoc failed, queuing for offline sync:', error);
-      syncService.enqueue('update', INVENTORY_COLLECTION, assetId, { ...updates, updatedAt: now, updatedBy });
+      updateDoc(docRef, { ...updates, updatedAt: now, updatedBy }).catch((error) => {
+        console.warn('[InventoryService] Background Firestore updateDoc failed (queued):', error);
+      });
     }
 
     return updatedItem;
@@ -380,7 +549,7 @@ class InventoryService {
   /**
    * Soft Delete Asset
    */
-  async deleteInventoryItem(assetId: string, deletedBy: string): Promise<void> {
+  async deleteInventoryItem(assetId: string, deletedBy: string, authorUserContext?: User | null): Promise<void> {
     const now = new Date().toISOString();
     const cache = this.getLocalCache();
     const index = cache.findIndex((item) => item.assetId === assetId);
@@ -390,7 +559,23 @@ class InventoryService {
       cache[index].deletedAt = now;
       cache[index].deletedBy = deletedBy;
       this.setLocalCache(cache);
+      await offlineStorage.putCachedEntity(INVENTORY_COLLECTION, assetId, cache[index], { updatedAt: now }).catch(() => {});
     }
+
+    // Resolve author user context
+    let resolvedAuthor: User | null = authorUserContext || null;
+    if (!resolvedAuthor && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('boims_active_user');
+        if (stored) resolvedAuthor = JSON.parse(stored);
+      } catch {}
+    }
+    if (!resolvedAuthor) {
+      resolvedAuthor = { uid: deletedBy, role: 'secretary', fullName: 'Barangay Officer' } as any;
+    }
+
+    // Enqueue mutation
+    syncService.enqueue('delete', INVENTORY_COLLECTION, assetId, { isDeleted: true, deletedAt: now, deletedBy }, resolvedAuthor);
 
     adminService
       .logAuditEvent({
@@ -399,16 +584,16 @@ class InventoryService {
         targetId: assetId,
         targetType: 'InventoryItem',
         performedBy: deletedBy,
-        performerRole: 'admin',
+        performerRole: resolvedAuthor.role || 'secretary',
       })
       .catch((err) => console.warn('[InventoryService] Audit log error:', err));
 
-    try {
+    // Non-blocking Firestore update if online
+    if (isAppOnline()) {
       const docRef = doc(db, INVENTORY_COLLECTION, assetId);
-      await updateDoc(docRef, { isDeleted: true, deletedAt: now, deletedBy });
-    } catch (error) {
-      console.warn('[InventoryService] Firestore delete failed, queuing for offline sync:', error);
-      syncService.enqueue('delete', INVENTORY_COLLECTION, assetId, { isDeleted: true, deletedAt: now, deletedBy });
+      updateDoc(docRef, { isDeleted: true, deletedAt: now, deletedBy }).catch((error) => {
+        console.warn('[InventoryService] Background Firestore delete failed (queued):', error);
+      });
     }
   }
 }

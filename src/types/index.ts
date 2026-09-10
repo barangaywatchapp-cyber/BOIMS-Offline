@@ -873,4 +873,6 @@ export interface SyncQueueItem {
   status: 'pending' | 'syncing' | 'failed' | 'resolved';
   errorMessage?: string;
   errorCode?: string;
+  userId?: string;
+  authorRole?: string;
 }

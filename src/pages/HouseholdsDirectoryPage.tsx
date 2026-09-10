@@ -726,8 +726,9 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
     setFormError(null);
 
     try {
+      let updatedHH: Household | null = null;
       if (isEditingHousehold && selectedHousehold) {
-        await residentService.updateHousehold(
+        updatedHH = await residentService.updateHousehold(
           selectedHousehold.householdId,
           saveAsDraft ? { ...payloadData, verificationStatus: 'draft' } : payloadData,
           user?.uid || 'user',
@@ -735,13 +736,21 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
           role,
           user?.fullName
         );
+        if (updatedHH) {
+          setHouseholds((prev) =>
+            prev.map((h) => (h.householdId === updatedHH!.householdId ? updatedHH! : h))
+          );
+          if (selectedHousehold?.householdId === updatedHH.householdId) {
+            setSelectedHousehold(updatedHH);
+          }
+        }
         setSuccessMessage(
           isResident && selectedHousehold.isVerified
-            ? 'Household profile updated successfully.'
+            ? 'Change request submitted for staff verification.'
             : 'Household profile updated successfully.'
         );
       } else {
-        await residentService.createHousehold(
+        updatedHH = await residentService.createHousehold(
           payloadData,
           user?.uid || 'user',
           isResident,
@@ -749,6 +758,12 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
           role,
           user?.fullName
         );
+        if (updatedHH) {
+          setHouseholds((prev) => [updatedHH!, ...prev.filter((h) => h.householdId !== updatedHH!.householdId)]);
+          if (isResident) {
+            setSelectedHousehold(updatedHH);
+          }
+        }
         setSuccessMessage(saveAsDraft ? 'Household draft saved.' : 'Household registered and submitted for verification.');
       }
 
@@ -908,8 +923,9 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
         contactNumber: memberContactNumber.trim() || undefined,
       };
 
+      let updatedHH: Household | null = null;
       if (editingMemberId) {
-        await residentService.updateHouseholdMember(
+        updatedHH = await residentService.updateHouseholdMember(
           currentHH.householdId,
           editingMemberId,
           memberPayload,
@@ -920,7 +936,7 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
         );
         setSuccessMessage('Household member updated successfully.');
       } else {
-        await residentService.addHouseholdMember(
+        updatedHH = await residentService.addHouseholdMember(
           currentHH.householdId,
           memberPayload,
           user?.uid || 'user',
@@ -929,6 +945,15 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
           user?.fullName
         );
         setSuccessMessage('Household member added successfully.');
+      }
+
+      if (updatedHH) {
+        setHouseholds((prev) =>
+          prev.map((h) => (h.householdId === updatedHH!.householdId ? updatedHH! : h))
+        );
+        if (selectedHousehold?.householdId === updatedHH.householdId) {
+          setSelectedHousehold(updatedHH);
+        }
       }
 
       setShowMemberModal(false);
@@ -950,7 +975,7 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
 
     setSubmitting(true);
     try {
-      await residentService.removeHouseholdMember(
+      const updatedHH = await residentService.removeHouseholdMember(
         currentHH.householdId,
         memberId,
         user?.uid || 'user',
@@ -958,10 +983,18 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
         role,
         user?.fullName
       );
+      if (updatedHH) {
+        setHouseholds((prev) =>
+          prev.map((h) => (h.householdId === updatedHH!.householdId ? updatedHH! : h))
+        );
+        if (selectedHousehold?.householdId === updatedHH.householdId) {
+          setSelectedHousehold(updatedHH);
+        }
+      }
       setSuccessMessage('Household member removed.');
       setTimeout(() => setSuccessMessage(null), 3000);
     } catch (err: any) {
-      alert(err.message || 'Failed to remove member.');
+      setFormError(err.message || 'Failed to remove member.');
     } finally {
       setSubmitting(false);
     }
@@ -974,7 +1007,7 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
 
     setSubmitting(true);
     try {
-      await residentService.changeHouseholdHead(
+      const updatedHH = await residentService.changeHouseholdHead(
         currentHH.householdId,
         selectedNewHeadId,
         user?.uid || 'user',
@@ -982,11 +1015,19 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
         role,
         user?.fullName
       );
+      if (updatedHH) {
+        setHouseholds((prev) =>
+          prev.map((h) => (h.householdId === updatedHH!.householdId ? updatedHH! : h))
+        );
+        if (selectedHousehold?.householdId === updatedHH.householdId) {
+          setSelectedHousehold(updatedHH);
+        }
+      }
       setSuccessMessage('Household Head updated successfully.');
       setShowChangeHeadModal(false);
       setTimeout(() => setSuccessMessage(null), 3000);
     } catch (err: any) {
-      alert(err.message || 'Failed to change household head.');
+      setFormError(err.message || 'Failed to change household head.');
     } finally {
       setSubmitting(false);
     }
@@ -1050,13 +1091,7 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
                     <Edit3 className="w-4 h-4" /> Edit Profile
                   </button>
                   <button
-                    onClick={() => {
-                      if (isResident) {
-                        setShowAddFamilyMemberModal(true);
-                      } else {
-                        handleOpenMemberModal();
-                      }
-                    }}
+                    onClick={() => handleOpenMemberModal()}
                     className="inline-flex items-center px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-all text-sm gap-1.5 cursor-pointer"
                   >
                     <UserPlus className="w-4 h-4" /> Add Family Member
@@ -1101,13 +1136,7 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
                     <Edit3 className="w-3.5 h-3.5" /> Edit Profile
                   </button>
                   <button
-                    onClick={() => {
-                      if (isResident) {
-                        setShowAddFamilyMemberModal(true);
-                      } else {
-                        handleOpenMemberModal();
-                      }
-                    }}
+                    onClick={() => handleOpenMemberModal()}
                     className="inline-flex items-center px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-all text-xs gap-1 cursor-pointer shadow-sm"
                   >
                     <UserPlus className="w-3.5 h-3.5" /> Add Family Member
@@ -1396,13 +1425,7 @@ export const HouseholdsDirectoryPage: React.FC<HouseholdsDirectoryPageProps> = (
                       </button>
                     )}
                     <button
-                      onClick={() => {
-                        if (isResident) {
-                          setShowAddFamilyMemberModal(true);
-                        } else {
-                          handleOpenMemberModal();
-                        }
-                      }}
+                      onClick={() => handleOpenMemberModal()}
                       className="inline-flex items-center px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold gap-1 transition-all"
                     >
                       <Plus className="w-3.5 h-3.5" /> Add Family Member
