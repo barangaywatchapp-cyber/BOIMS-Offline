@@ -265,13 +265,11 @@ service cloud.firestore {
 
     match /userBoimsIndexes/{userId} {
       allow read: if isAuthenticated() && (request.auth.uid == userId || isStaffOrAdmin());
-      allow create: if isStaffOrAdmin() &&
-        hasClaimableRegistration(userId) &&
+      allow create: if (isAdmin() || (isStaffOrAdmin() && hasClaimableRegistration(userId))) &&
         isValidBoimsId(request.resource.data.boimsId) &&
         request.resource.data.keys().hasOnly(['boimsId', 'createdAt', 'updatedAt']) &&
         getAfter(/databases/$(database)/documents/boimsIds/$(request.resource.data.boimsId)).data.uid == userId;
-      allow update: if isStaffOrAdmin() &&
-        hasValidRegistration(userId) &&
+      allow update: if (isAdmin() || (isStaffOrAdmin() && hasValidRegistration(userId))) &&
         request.resource.data.boimsId == resource.data.boimsId &&
         request.resource.data.keys().hasOnly(['boimsId', 'createdAt', 'updatedAt']) &&
         getAfter(/databases/$(database)/documents/boimsIds/$(resource.data.boimsId)).data.uid == userId;
@@ -281,11 +279,10 @@ service cloud.firestore {
     match /boimsIds/{boimsId} {
       allow get: if isAuthenticated();
       allow list: if isStaffOrAdmin();
-      allow create: if isStaffOrAdmin() &&
+      allow create: if (isAdmin() || (isStaffOrAdmin() && hasClaimableRegistration(request.resource.data.uid))) &&
         isValidBoimsId(boimsId) &&
         request.resource.data.keys().hasOnly(['uid', 'createdAt']) &&
         request.resource.data.uid is string &&
-        hasClaimableRegistration(request.resource.data.uid) &&
         getAfter(/databases/$(database)/documents/userBoimsIndexes/$(request.resource.data.uid)).data.boimsId == boimsId;
       allow update: if false;
       allow delete: if isAdmin();

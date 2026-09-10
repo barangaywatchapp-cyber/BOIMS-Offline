@@ -21,7 +21,7 @@ import {
   DocumentSnapshot,
 } from 'firebase/firestore';
 import { initializeApp, getApps } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
+import { getAuth, createUserWithEmailAndPassword, signOut, deleteUser } from 'firebase/auth';
 import { db, auth } from '../firebase/config';
 import { env } from '../config/env';
 import { User, UserRole, AccountStatus, AuditLog, BarangayProfileSettings, AppSettings } from '../types';
@@ -288,42 +288,43 @@ export class AdminService {
     const secondaryAuth = getAuth(secondaryApp);
 
     let uid = '';
+    let createdAuthUser: any = null;
     try {
       const userCredential = await createUserWithEmailAndPassword(secondaryAuth, cleanEmail, dto.password);
+      createdAuthUser = userCredential.user;
       uid = userCredential.user.uid;
-      await signOut(secondaryAuth);
     } catch (authErr: any) {
       console.error('[AdminService] Firebase Auth creation failed for official account:', authErr);
       throw new Error(`Failed to create Firebase Auth account: ${authErr.message || authErr}`);
     }
 
-    const boimsId = await claimUniqueBoimsId(uid);
-
-    const officialUser: User = {
-      uid,
-      boimsId,
-      email: cleanEmail,
-      firstName: dto.firstName.trim(),
-      lastName: dto.lastName.trim(),
-      fullName: `${dto.firstName.trim()} ${dto.lastName.trim()}`,
-      phoneNumber: '',
-      address: 'Barangay Hall Official Address',
-      purok: dto.purok || 'Central',
-      barangay: 'Barangay Central',
-      municipality: 'Baras',
-      province: 'Rizal',
-      role: dto.role,
-      status: 'active',
-      emailVerified: true,
-      mustChangePassword: true,
-      isActive: true,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      createdBy: performedByUid,
-      isDeleted: false,
-    };
-
     try {
+      const boimsId = await claimUniqueBoimsId(uid);
+
+      const officialUser: User = {
+        uid,
+        boimsId,
+        email: cleanEmail,
+        firstName: dto.firstName.trim(),
+        lastName: dto.lastName.trim(),
+        fullName: `${dto.firstName.trim()} ${dto.lastName.trim()}`,
+        phoneNumber: '',
+        address: 'Barangay Hall Official Address',
+        purok: dto.purok || 'Central',
+        barangay: 'Barangay Central',
+        municipality: 'Baras',
+        province: 'Rizal',
+        role: dto.role,
+        status: 'active',
+        emailVerified: true,
+        mustChangePassword: true,
+        isActive: true,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        createdBy: performedByUid,
+        isDeleted: false,
+      };
+
       await setDoc(doc(db, 'users', uid), officialUser);
       syncBoimsIndexMetadata(uid, officialUser).catch(() => {});
 
@@ -339,9 +340,21 @@ export class AdminService {
         reason: `Official ${dto.role.toUpperCase()} account manually created by Super Admin with real Firebase Auth credentials`,
       });
 
+      await signOut(secondaryAuth);
       return officialUser;
     } catch (err: any) {
-      console.error('[AdminService] Error creating official account doc:', err);
+      console.error('[AdminService] Error creating official account doc, initiating Auth rollback:', err);
+      if (createdAuthUser) {
+        try {
+          await deleteUser(createdAuthUser);
+          console.info(`[AdminService] Rolled back and deleted orphaned Firebase Auth account ${uid}`);
+        } catch (delErr) {
+          console.warn('[AdminService] Failed to delete orphaned Auth user during rollback:', delErr);
+        }
+      }
+      try {
+        await signOut(secondaryAuth);
+      } catch (_) {}
       throw new Error(`Failed to create official account document: ${err.message}`);
     }
   }
