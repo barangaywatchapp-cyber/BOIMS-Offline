@@ -8,13 +8,13 @@ import { ROUTES } from '../constants';
 
 /**
  * Roles allowed to view and access the Resident Directory (/residents).
- * Strictly limited to: Secretary, Chairman, Admin, Super Admin, Developer.
+ * Strictly limited to: Secretary, Chairman, Admin, Developer.
+ * Explicitly DENIED: superAdmin, resident, purokOfficial, verifier.
  */
 export const ALLOWED_RESIDENT_DIRECTORY_ROLES: UserRole[] = [
   'secretary',
   'chairman',
   'admin',
-  'superAdmin',
   'developer',
 ];
 
@@ -59,8 +59,19 @@ export function isResidentMode(user: User | null | undefined, role: UserRole | n
 }
 
 /**
+ * Checks if a role has system-level administrator privileges.
+ * Exactly matches the pre-Super-Admin baseline: admin, superAdmin, developer.
+ * Returns false for chairman, secretary, treasurer, verifier, purokOfficial, resident.
+ */
+export function isAdmin(role: UserRole | null | undefined): boolean {
+  if (!role) return false;
+  return role === 'admin' || role === 'superAdmin' || role === 'developer';
+}
+
+/**
  * Checks if a user can access the Resident Directory (/residents).
- * Strictly returns true for Secretary, Chairman, Admin, Super Admin, and Developer.
+ * Strictly returns true for Secretary, Chairman, Admin, and Developer.
+ * Explicitly returns false for Super Admin, Resident, Verifier, and Purok Officials.
  */
 export function canAccessResidentDirectory(role: UserRole | null): boolean {
   if (!role) return false;
@@ -191,8 +202,12 @@ export function canShowMyProfileInNav(user: User | null, role: UserRole | null):
 
 /**
  * Resolves the canonical dashboard route for a given user role or profile.
- * In BOIMS, all roles land on the centralized, role-adaptive dashboard at ROUTES.DASHBOARD ('/dashboard').
+ * - superAdmin: dedicated functional dashboard is User Management at ROUTES.USERS ('/users').
+ * - All other roles: centralized role-adaptive dashboard at ROUTES.DASHBOARD ('/dashboard').
  */
-export function getRoleDashboardRoute(_role?: UserRole | null): string {
+export function getRoleDashboardRoute(role?: UserRole | null): string {
+  if (role === 'superAdmin') {
+    return ROUTES.USERS;
+  }
   return ROUTES.DASHBOARD;
 }

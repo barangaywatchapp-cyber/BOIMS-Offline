@@ -73,6 +73,13 @@ export const DashboardShellPage: React.FC = () => {
   const { user, role, canViewResidentQueue, hasActiveDispatcher, isAuthInitialized } = useAuth();
   const { isOnline, pendingCount } = useOffline();
 
+  // Super Admin functional dashboard is User Management (/users); redirect if landed on /dashboard
+  useEffect(() => {
+    if (role === 'superAdmin') {
+      navigate(ROUTES.USERS, { replace: true });
+    }
+  }, [role, navigate]);
+
   const isResident = isResidentMode(user, role);
   const isPurokOfficial = role === 'purokOfficial';
   const isOffDutyOfficial = isPurokOfficial && (user?.dutyStatus === 'offDuty' || user?.dutyMode === 'offDuty');

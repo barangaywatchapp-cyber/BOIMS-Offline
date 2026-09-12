@@ -190,6 +190,44 @@ export class AuthService {
   }
 
   /**
+   * Completes initial password setup for administratively provisioned accounts.
+   * Updates Firebase Auth password and clears mustChangePassword flag on /users/{uid}.
+   */
+  async completePasswordSetup(newPassword: string, currentPassword?: string): Promise<void> {
+    const currentUser = auth.currentUser;
+    if (!currentUser || !currentUser.email) {
+      throw new Error('No active authentication session found.');
+    }
+    if (!newPassword || newPassword.length < 8) {
+      throw new Error('New password must be at least 8 characters long.');
+    }
+
+    try {
+      if (currentPassword) {
+        const credential = EmailAuthProvider.credential(currentUser.email, currentPassword);
+        await reauthenticateWithCredential(currentUser, credential);
+      }
+      // Step 1: Update Firebase Auth password
+      await updatePassword(currentUser, newPassword);
+
+      // Step 2: Clear mustChangePassword on Firestore user record
+      const userDocRef = doc(db, 'users', currentUser.uid);
+      await updateDoc(userDocRef, {
+        mustChangePassword: false,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error: any) {
+      if (error.code === 'auth/wrong-password') {
+        throw new Error('Current password is incorrect.');
+      }
+      if (error.code === 'auth/requires-recent-login') {
+        throw new Error('Recent login required. Please enter your current/temporary password or log in again.');
+      }
+      throw new Error(error.message || 'Failed to complete password setup.');
+    }
+  }
+
+  /**
    * Updates user profile picture in Firestore and Firebase Auth
    */
   async updateProfilePhoto(uid: string, photoUrl: string): Promise<void> {

@@ -34,6 +34,8 @@ import {
   ShieldCheck,
   UserCheck,
   User,
+  History,
+  RefreshCw,
 } from 'lucide-react';
 
 export interface NavigationDrawerProps {
@@ -65,6 +67,19 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({ isOpen, onCl
   };
 
   const getNavItems = () => {
+    // Dedicated Super Admin navigation scope:
+    // PRIMARY: User Management
+    // SECONDARY / ADMINISTRATIVE: Admin History
+    // SYSTEM MODULES: Offline Queue & Sync, Production Readiness
+    if (role === 'superAdmin') {
+      return [
+        { label: 'User Management', path: ROUTES.USERS, icon: <Users className="w-5 h-5" /> },
+        { label: 'Admin History', path: ROUTES.ADMIN_HISTORY, icon: <History className="w-5 h-5" /> },
+        { label: 'Offline Queue & Sync', path: ROUTES.OFFLINE_SYNC, icon: <RefreshCw className="w-5 h-5" /> },
+        { label: 'Production Readiness', path: ROUTES.SYSTEM_HEALTH, icon: <ShieldCheck className="w-5 h-5" /> },
+      ];
+    }
+
     if (role === 'verifier') {
       return [
         { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: <LayoutDashboard className="w-5 h-5" /> },

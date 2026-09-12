@@ -165,7 +165,10 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if isAuthenticated() && (request.auth.uid == userId || isStaffOrAdmin() || isTreasurer());
       allow create: if isAuthenticated() && (
-        isAdmin() ||
+        (
+          isAdmin() &&
+          (!('role' in request.resource.data) || request.resource.data.role != 'superAdmin')
+        ) ||
         (
           isStaffOrAdmin() &&
           hasValidRegistration(userId) &&
@@ -188,7 +191,10 @@ service cloud.firestore {
         )
       );
       allow update: if isAuthenticated() && (
-        isAdmin() ||
+        (
+          isAdmin() &&
+          (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']) || request.resource.data.role != 'superAdmin')
+        ) ||
         (
           isStaffOrAdmin() &&
           hasValidRegistration(userId) &&

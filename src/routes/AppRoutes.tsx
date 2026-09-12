@@ -6,11 +6,13 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { ProtectedRoute } from './ProtectedRoute';
+import { PasswordSetupRoute } from './PasswordSetupRoute';
 import { RoleGuard } from './RoleGuard';
 import { AppShell } from '../components/layout/AppShell';
 import { LandingPage } from '../pages/LandingPage';
 import { LoginPage } from '../pages/LoginPage';
 import { ForgotPasswordPage } from '../pages/ForgotPasswordPage';
+import { SetupPasswordPage } from '../pages/SetupPasswordPage';
 import { ProfilePage } from '../pages/ProfilePage';
 import { ReportsListPage } from '../pages/ReportsListPage';
 import { CreateReportPage } from '../pages/CreateReportPage';
@@ -31,6 +33,7 @@ import { BlotterPage } from '../pages/BlotterPage';
 import { InventoryPage } from '../pages/InventoryPage';
 import { UserManagementPage } from '../pages/UserManagementPage';
 import { AuditLogsPage } from '../pages/AuditLogsPage';
+import { AdminHistoryPage } from '../pages/AdminHistoryPage';
 import { SettingsPage } from '../pages/SettingsPage';
 import { OfflineSyncPage } from '../pages/OfflineSyncPage';
 import { ProductionReadinessPage } from '../pages/ProductionReadinessPage';
@@ -53,6 +56,14 @@ export const AppRoutes: React.FC = () => {
       <Route path={ROUTES.VERIFY_EMAIL} element={<VerifyEmailPage />} />
       <Route path={ROUTES.PENDING_VERIFICATION} element={<PendingVerificationPage />} />
       <Route path={ROUTES.FORGOT_PASSWORD} element={<ForgotPasswordPage />} />
+      <Route
+        path={ROUTES.SETUP_PASSWORD}
+        element={
+          <PasswordSetupRoute>
+            <SetupPasswordPage />
+          </PasswordSetupRoute>
+        }
+      />
       <Route path={ROUTES.UNAUTHORIZED} element={<UnauthorizedPage />} />
       <Route path={ROUTES.CERTIFICATE_VERIFY} element={<VerifyCertificatePage />} />
 
@@ -75,14 +86,70 @@ export const AppRoutes: React.FC = () => {
         }
       >
         <Route path={ROUTES.DASHBOARD} element={<DashboardShellPage />} />
-        <Route path={ROUTES.REPORTS} element={<ReportsListPage />} />
-        <Route path={ROUTES.REPORT_CREATE} element={<CreateReportPage />} />
-        <Route path={ROUTES.REPORT_DETAILS(':id')} element={<ReportDetailsPage />} />
-        <Route path={ROUTES.CERTIFICATES} element={<CertificatesListPage />} />
-        <Route path={ROUTES.CERTIFICATE_REQUEST} element={<RequestCertificatePage />} />
-        <Route path={ROUTES.CERTIFICATE_DETAILS(':id')} element={<CertificateDetailsPage />} />
-        <Route path={ROUTES.ANNOUNCEMENTS} element={<AnnouncementsListPage />} />
-        <Route path={ROUTES.NOTIFICATIONS} element={<NotificationsPage />} />
+        <Route
+          path={ROUTES.REPORTS}
+          element={
+            <RoleGuard disallowedRoles={['superAdmin']}>
+              <ReportsListPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path={ROUTES.REPORT_CREATE}
+          element={
+            <RoleGuard disallowedRoles={['superAdmin']}>
+              <CreateReportPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path={ROUTES.REPORT_DETAILS(':id')}
+          element={
+            <RoleGuard disallowedRoles={['superAdmin']}>
+              <ReportDetailsPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path={ROUTES.CERTIFICATES}
+          element={
+            <RoleGuard disallowedRoles={['superAdmin']}>
+              <CertificatesListPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path={ROUTES.CERTIFICATE_REQUEST}
+          element={
+            <RoleGuard disallowedRoles={['superAdmin']}>
+              <RequestCertificatePage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path={ROUTES.CERTIFICATE_DETAILS(':id')}
+          element={
+            <RoleGuard disallowedRoles={['superAdmin']}>
+              <CertificateDetailsPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path={ROUTES.ANNOUNCEMENTS}
+          element={
+            <RoleGuard disallowedRoles={['superAdmin']}>
+              <AnnouncementsListPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path={ROUTES.NOTIFICATIONS}
+          element={
+            <RoleGuard disallowedRoles={['superAdmin']}>
+              <NotificationsPage />
+            </RoleGuard>
+          }
+        />
         <Route path={ROUTES.PROFILE} element={<ProfilePage />} />
         <Route path={ROUTES.HOUSEHOLDS} element={<HouseholdsDirectoryPage />} />
         <Route path={ROUTES.OFFLINE_SYNC} element={<OfflineSyncPage />} />
@@ -101,7 +168,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.RESIDENTS}
           element={
-            <RoleGuard requireResidentDirectory>
+            <RoleGuard requireResidentDirectory disallowedRoles={['superAdmin']}>
               <ResidentsDirectoryPage />
             </RoleGuard>
           }
@@ -137,7 +204,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.REGISTRATION_APPROVALS}
           element={
-            <RoleGuard allowedRoles={['verifier', 'secretary', 'admin', 'chairman', 'superAdmin']}>
+            <RoleGuard allowedRoles={['verifier', 'secretary', 'admin', 'chairman']}>
               <RegistrationApprovalPage />
             </RoleGuard>
           }
@@ -148,6 +215,15 @@ export const AppRoutes: React.FC = () => {
           element={
             <RoleGuard allowedRoles={['admin', 'chairman', 'superAdmin']}>
               <UserManagementPage />
+            </RoleGuard>
+          }
+        />
+
+        <Route
+          path={ROUTES.ADMIN_HISTORY}
+          element={
+            <RoleGuard allowedRoles={['superAdmin']}>
+              <AdminHistoryPage />
             </RoleGuard>
           }
         />

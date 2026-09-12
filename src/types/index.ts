@@ -810,6 +810,7 @@ export interface AuditLog {
   module: string;
   targetId: string;
   targetType: string;
+  targetName?: string;
   performedBy: string;
   performerName?: string;
   performerRole: UserRole;

@@ -12,6 +12,7 @@ import { canAccessMyHousehold, canAccessResidentDirectory } from '../utils/permi
 
 export interface RoleGuardProps {
   allowedRoles?: UserRole[];
+  disallowedRoles?: UserRole[];
   requireResidentMode?: boolean;
   requireResidentDirectory?: boolean;
   children: React.ReactElement;
@@ -19,11 +20,17 @@ export interface RoleGuardProps {
 
 export const RoleGuard: React.FC<RoleGuardProps> = ({
   allowedRoles,
+  disallowedRoles,
   requireResidentMode,
   requireResidentDirectory,
   children,
 }) => {
   const { user, role } = useAuth();
+
+  // If user's role is explicitly disallowed from accessing this route
+  if (disallowedRoles && role && disallowedRoles.includes(role)) {
+    return <Navigate to={ROUTES.UNAUTHORIZED} replace />;
+  }
 
   if (requireResidentDirectory) {
     if (!canAccessResidentDirectory(role)) {

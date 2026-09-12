@@ -117,7 +117,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({ onOpenMobileMenu }) => {
         </button>
 
         {/* Mobile Logo */}
-        <NavLink to={ROUTES.DASHBOARD} className="md:hidden flex items-center gap-2">
+        <NavLink to={role === 'superAdmin' ? ROUTES.USERS : ROUTES.DASHBOARD} className="md:hidden flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-blue-700 flex items-center justify-center shrink-0">
             <Shield className="w-5 h-5 text-white" />
           </div>
@@ -156,19 +156,21 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({ onOpenMobileMenu }) => {
 
       {/* Right Actions: Notification Bell, User Menu */}
       <div className="flex items-center gap-2 sm:gap-3">
-        {/* Notifications Icon */}
-        <NavLink
-          to={ROUTES.NOTIFICATIONS}
-          className="relative p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
-          title="Notifications"
-        >
-          <Bell className="w-5 h-5" />
-          {unreadNotifCount > 0 && (
-            <span className="absolute top-1 right-1 px-1.5 py-0.5 text-[10px] font-extrabold text-white bg-red-600 rounded-full ring-2 ring-white leading-none">
-              {unreadNotifCount > 99 ? '99+' : unreadNotifCount}
-            </span>
-          )}
-        </NavLink>
+        {/* Notifications Icon (Hidden for Super Admin) */}
+        {role !== 'superAdmin' && (
+          <NavLink
+            to={ROUTES.NOTIFICATIONS}
+            className="relative p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
+            title="Notifications"
+          >
+            <Bell className="w-5 h-5" />
+            {unreadNotifCount > 0 && (
+              <span className="absolute top-1 right-1 px-1.5 py-0.5 text-[10px] font-extrabold text-white bg-red-600 rounded-full ring-2 ring-white leading-none">
+                {unreadNotifCount > 99 ? '99+' : unreadNotifCount}
+              </span>
+            )}
+          </NavLink>
+        )}
 
         {/* User Profile Dropdown */}
         {user && (

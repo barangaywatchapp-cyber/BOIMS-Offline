@@ -14,7 +14,7 @@ export interface ProtectedRouteProps {
 }
 
 export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
-  const { isAuthenticated, loading } = useAuth();
+  const { isAuthenticated, loading, user } = useAuth();
 
   if (loading) {
     return (
@@ -26,6 +26,11 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
 
   if (!isAuthenticated) {
     return <Navigate to={ROUTES.LOGIN} replace />;
+  }
+
+  // Functional enforcement: newly provisioned users must complete password setup before accessing any protected application view
+  if (user?.mustChangePassword) {
+    return <Navigate to={ROUTES.SETUP_PASSWORD} replace />;
   }
 
   return children;

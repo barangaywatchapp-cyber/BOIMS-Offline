@@ -8,13 +8,14 @@
  * - Role hierarchy verification and audit logging
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { NavLink } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { adminService } from '../services/adminService';
 import { formatPresenceDisplay, OFFICIAL_ROLES } from '../services/presenceService';
 import { User, UserRole, AccountStatus } from '../types';
-import { ROLE_LABELS } from '../constants';
+import { ROLE_LABELS, ROUTES, PUROK_OPTIONS } from '../constants';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/foundation/Card';
 import { Button } from '../components/foundation/Button';
 import { Badge } from '../components/foundation/Badge';
@@ -39,6 +40,7 @@ import {
   AlertTriangle,
   Lock,
   WifiOff,
+  History,
 } from 'lucide-react';
 
 export const UserManagementPage: React.FC = () => {
@@ -59,6 +61,17 @@ export const UserManagementPage: React.FC = () => {
   const [editRole, setEditRole] = useState<UserRole>('resident');
   const [editStatus, setEditStatus] = useState<AccountStatus>('active');
 
+  // Dynamically load Purok options from canonical BOIMS source and existing user records
+  const purokOptions = useMemo(() => {
+    const set = new Set<string>(PUROK_OPTIONS);
+    users.forEach((u) => {
+      if (u.purok && typeof u.purok === 'string' && u.purok.trim()) {
+        set.add(u.purok.trim());
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [users]);
+
   // Add User Form state
   const [formData, setFormData] = useState({
     firstName: '',
@@ -66,10 +79,17 @@ export const UserManagementPage: React.FC = () => {
     email: '',
     phoneNumber: '',
     address: 'Barangay Central',
-    purok: 'Purok 1',
+    purok: '',
     role: 'purokOfficial' as UserRole,
     status: 'active' as AccountStatus,
   });
+
+  // Keep selected purok synchronized when purokOptions become available
+  useEffect(() => {
+    if (purokOptions.length > 0 && !formData.purok) {
+      setFormData((prev) => ({ ...prev, purok: prev.purok || purokOptions[0] }));
+    }
+  }, [purokOptions, formData.purok]);
 
   const canManageUsers = currentRole === 'superAdmin' || currentRole === 'admin' || currentRole === 'chairman';
 
@@ -111,44 +131,28 @@ export const UserManagementPage: React.FC = () => {
     e.preventDefault();
     if (!currentUser) return;
 
+    if (!formData.purok || !formData.purok.trim()) {
+      alert('Please select a valid Purok jurisdiction.');
+      return;
+    }
+
     try {
-      if (['verifier', 'secretary', 'chairman', 'admin'].includes(formData.role)) {
-        await adminService.createOfficialAccount(
-          {
-            email: formData.email,
-            password: 'TempPassword123!',
-            firstName: formData.firstName,
-            lastName: formData.lastName,
-            role: formData.role as 'verifier' | 'secretary' | 'chairman' | 'admin',
-            purok: formData.purok,
-          },
-          currentUser.uid,
-          currentUser.fullName,
-          currentUser.role
-        );
-      } else {
-        await adminService.createUserAccount(
-          {
-            email: formData.email,
-            firstName: formData.firstName,
-            lastName: formData.lastName,
-            fullName: `${formData.firstName} ${formData.lastName}`,
-            phoneNumber: formData.phoneNumber,
-            address: formData.address,
-            purok: formData.purok,
-            barangay: 'Barangay Central',
-            municipality: 'Baras',
-            province: 'Rizal',
-            role: formData.role,
-            status: formData.status,
-            emailVerified: true,
-            isActive: formData.status === 'active',
-          },
-          currentUser.uid,
-          currentUser.fullName,
-          currentUser.role
-        );
-      }
+      await adminService.createOfficialAccount(
+        {
+          email: formData.email,
+          firstName: formData.firstName,
+          lastName: formData.lastName,
+          role: formData.role,
+          status: formData.status,
+          phoneNumber: formData.phoneNumber,
+          purok: formData.purok,
+          address: formData.address,
+        },
+        currentUser.uid,
+        currentUser.fullName,
+        currentUser.role
+      );
+
       setShowAddModal(false);
       setFormData({
         firstName: '',
@@ -156,11 +160,11 @@ export const UserManagementPage: React.FC = () => {
         email: '',
         phoneNumber: '',
         address: 'Barangay Central',
-        purok: 'Purok 1',
+        purok: purokOptions[0] || '',
         role: 'verifier' as UserRole,
         status: 'active',
       });
-      alert('New official account created successfully. The official will be prompted to change their password on first login.');
+      alert('Account created successfully. The user will be prompted to set/change their password on first login.');
     } catch (err) {
       alert('Error creating user account: ' + (err as Error).message);
     }
@@ -248,6 +252,13 @@ export const UserManagementPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          {currentRole === 'superAdmin' && (
+            <NavLink to={ROUTES.ADMIN_HISTORY}>
+              <Button variant="outline" size="md" className="flex items-center gap-2 text-white border-slate-700 hover:bg-slate-800">
+                <History className="w-4 h-4" /> Admin History
+              </Button>
+            </NavLink>
+          )}
           {canManageUsers && (
             <Button
               variant="primary"
@@ -530,6 +541,7 @@ export const UserManagementPage: React.FC = () => {
                 >
                   <option value="resident">Resident (Standard User)</option>
                   <option value="purokOfficial">Sitio/Purok Official</option>
+                  <option value="verifier">Identity Verifier</option>
                   <option value="secretary">Barangay Secretary (Records & Certs)</option>
                   <option value="admin">Administrator (Full Admin Access)</option>
                   <option value="chairman">Barangay Chairman (Executive Authority)</option>
@@ -625,13 +637,31 @@ export const UserManagementPage: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Purok</label>
-                  <input
-                    type="text"
-                    value={formData.purok}
-                    onChange={(e) => setFormData({ ...formData, purok: e.target.value })}
-                    className="w-full p-2 border border-slate-300 rounded-lg text-sm"
-                  />
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Sitio / Purok Jurisdiction *
+                  </label>
+                  {loading && purokOptions.length === 0 ? (
+                    <div className="w-full p-2 border border-slate-200 bg-slate-50 rounded-lg text-xs text-slate-500 italic">
+                      Loading Purok options...
+                    </div>
+                  ) : purokOptions.length === 0 ? (
+                    <div className="w-full p-2 border border-amber-200 bg-amber-50 rounded-lg text-xs text-amber-700">
+                      No Purok records found
+                    </div>
+                  ) : (
+                    <select
+                      value={formData.purok}
+                      onChange={(e) => setFormData({ ...formData, purok: e.target.value })}
+                      required
+                      className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-emerald-500"
+                    >
+                      {purokOptions.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               </div>
 

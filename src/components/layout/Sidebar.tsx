@@ -37,6 +37,7 @@ import {
   Activity,
   RefreshCw,
   User,
+  History,
 } from 'lucide-react';
 
 export interface SidebarProps {
@@ -49,6 +50,20 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggleCollapse })
   const navigate = useNavigate();
 
   const getNavItems = () => {
+    // Dedicated Super Admin navigation scope:
+    // PRIMARY: User Management
+    // SECONDARY / ADMINISTRATIVE: Admin History
+    // SYSTEM MODULES: Offline Queue & Sync, Production Readiness
+    // Excluded: Reports, Certificates, Announcements, Notifications, Residents Directory, Registration Requests
+    if (role === 'superAdmin') {
+      return [
+        { label: 'User Management', path: ROUTES.USERS, icon: <Users className="w-5 h-5" /> },
+        { label: 'Admin History', path: ROUTES.ADMIN_HISTORY, icon: <History className="w-5 h-5" /> },
+        { label: 'Offline Queue & Sync', path: ROUTES.OFFLINE_SYNC, icon: <RefreshCw className="w-5 h-5" /> },
+        { label: 'Production Readiness', path: ROUTES.SYSTEM_HEALTH, icon: <ShieldCheck className="w-5 h-5" /> },
+      ];
+    }
+
     if (role === 'verifier') {
       return [
         { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: <LayoutDashboard className="w-5 h-5" /> },
@@ -143,7 +158,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggleCollapse })
     >
       {/* Brand Header */}
       <div className="h-16 px-4 flex items-center justify-between border-b border-slate-800/80">
-        <NavLink to={ROUTES.DASHBOARD} className="flex items-center gap-3 overflow-hidden">
+        <NavLink to={role === 'superAdmin' ? ROUTES.USERS : ROUTES.DASHBOARD} className="flex items-center gap-3 overflow-hidden">
           <div className="w-10 h-10 rounded-xl bg-blue-700 flex items-center justify-center shrink-0 shadow-md">
             <Shield className="w-6 h-6 text-white" />
           </div>

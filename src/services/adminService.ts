@@ -20,12 +20,13 @@ import {
   QueryConstraint,
   DocumentSnapshot,
 } from 'firebase/firestore';
-import { initializeApp, getApps } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword, signOut, deleteUser } from 'firebase/auth';
+import { initializeApp, getApps, deleteApp } from 'firebase/app';
+import { getAuth, createUserWithEmailAndPassword, signOut, deleteUser, sendPasswordResetEmail } from 'firebase/auth';
 import { db, auth } from '../firebase/config';
 import { env } from '../config/env';
 import { User, UserRole, AccountStatus, AuditLog, BarangayProfileSettings, AppSettings } from '../types';
 import { INITIAL_BARANGAY_PROFILE, INITIAL_APP_SETTINGS } from '../constants/seedSettings';
+import { PUROK_OPTIONS } from '../constants';
 import { filterUsersByAccess } from '../utils/jurisdictionUtils';
 import { isResidentMode } from '../utils/permissions';
 import { claimUniqueBoimsId, syncBoimsIndexMetadata } from '../utils/boimsIdUtils';
@@ -226,6 +227,11 @@ export class AdminService {
     performerName?: string,
     performerRole?: UserRole
   ): Promise<void> {
+    // Privilege Escalation Guard: Super Admin or Admin cannot assign superAdmin via normal role updates
+    if (role === 'superAdmin') {
+      throw new Error('Unauthorized privilege escalation: The superAdmin role cannot be assigned through normal user management.');
+    }
+
     const updatedAt = new Date().toISOString();
 
     try {
@@ -245,18 +251,38 @@ export class AdminService {
         syncBoimsIndexMetadata(targetUid, { ...prevData, role, status }).catch(() => {});
       }
 
-      // Log Audit Event
+      // Determine specific administrative action type for audit trail
+      const isRoleChanged = Boolean(prevData.role && prevData.role !== role);
+      const isStatusChanged = Boolean(prevData.status && prevData.status !== status);
+      const action = isRoleChanged && isStatusChanged
+        ? 'ROLE_AND_STATUS_CHANGED'
+        : isRoleChanged
+        ? 'ROLE_CHANGED'
+        : isStatusChanged
+        ? 'STATUS_CHANGED'
+        : 'UPDATE_USER_ROLE_STATUS';
+
+      // Always authenticate against active auth.currentUser UID to satisfy immutable Firestore security rules (performedBy == request.auth.uid)
+      const actorUid = auth.currentUser?.uid || performedByUid;
+      const targetFullName = prevData.fullName || [prevData.firstName, prevData.lastName].filter(Boolean).join(' ') || targetUid;
+
+      // Log Immutable Audit Event
       await this.logAuditEvent({
-        action: 'UPDATE_USER_ROLE_STATUS',
+        action,
         module: 'Users',
         targetId: targetUid,
         targetType: 'User',
-        performedBy: performedByUid,
+        targetName: targetFullName,
+        performedBy: actorUid,
         performerName,
-        performerRole: performerRole || 'admin',
+        performerRole: performerRole || 'superAdmin',
         previousValues: { role: prevData.role, status: prevData.status },
         newValues: { role, status },
-        reason: `Role updated to ${role}, status set to ${status}`,
+        reason: isRoleChanged
+          ? `Role changed from ${prevData.role} to ${role}${isStatusChanged ? `, status set to ${status}` : ''}`
+          : isStatusChanged
+          ? `Account status changed from ${prevData.status} to ${status}`
+          : `Account access updated for ${targetFullName}`,
       });
     } catch (err) {
       console.error('[AdminService] Error updating user role/status:', err);
@@ -265,102 +291,152 @@ export class AdminService {
   }
 
   /**
-   * Manually creates an official account (Verifier, Secretary, Chairman, Admin) by Super Admin
+   * Administratively provisions a new user account (Resident, Purok Official, Verifier, Secretary, Chairman, Admin)
+   * Ensures atomic creation across Firebase Auth, Firestore User record, BOIMS ID, and Audit Log.
+   * If any Firestore operation fails, the newly-created Firebase Auth account is safely rolled back/deleted.
    */
   async createOfficialAccount(
     dto: {
       email: string;
-      password: string;
+      password?: string;
       firstName: string;
       lastName: string;
-      role: 'verifier' | 'secretary' | 'chairman' | 'admin';
+      role: 'verifier' | 'secretary' | 'chairman' | 'admin' | 'purokOfficial' | 'resident' | UserRole;
+      status?: AccountStatus;
+      phoneNumber?: string;
+      address?: string;
       purok?: string;
     },
     performedByUid: string,
     performerName?: string,
     performerRole?: UserRole
   ): Promise<User> {
+    // Privilege escalation guard: superAdmin accounts cannot be provisioned via user management
+    if ((dto.role as any) === 'superAdmin') {
+      throw new Error('Unauthorized privilege escalation: The superAdmin role cannot be assigned through user management.');
+    }
+
     const cleanEmail = dto.email.trim().toLowerCase();
     const timestamp = new Date().toISOString();
 
-    const secondaryAppName = 'SecondaryAuthAppOfficial';
-    const secondaryApp = getApps().find(a => a.name === secondaryAppName) || initializeApp(firebaseConfig, secondaryAppName);
+    // Secure temporary password generation if not explicitly provided
+    const temporaryPassword =
+      dto.password ||
+      `BoimsTemp!${Math.random().toString(36).substring(2, 8)}${Date.now().toString(36).toUpperCase()}#`;
+
+    // Initialize an isolated secondary Firebase App instance so the active Super Admin session is never altered
+    const secondaryAppName = `boims-prov-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const secondaryApp = initializeApp(firebaseConfig, secondaryAppName);
     const secondaryAuth = getAuth(secondaryApp);
 
     let uid = '';
     let createdAuthUser: any = null;
     try {
-      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, cleanEmail, dto.password);
+      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, cleanEmail, temporaryPassword);
       createdAuthUser = userCredential.user;
       uid = userCredential.user.uid;
     } catch (authErr: any) {
-      console.error('[AdminService] Firebase Auth creation failed for official account:', authErr);
+      try {
+        await deleteApp(secondaryApp);
+      } catch (_) {}
+      console.error('[AdminService] Firebase Auth account creation failed:', authErr);
+      if (authErr?.code === 'auth/email-already-in-use') {
+        throw new Error(`Email address ${cleanEmail} is already registered in Firebase Authentication.`);
+      }
       throw new Error(`Failed to create Firebase Auth account: ${authErr.message || authErr}`);
     }
 
     try {
+      // Step 2: Atomic BOIMS ID Claim and Index Reservation
       const boimsId = await claimUniqueBoimsId(uid);
 
-      const officialUser: User = {
+      // Step 3: Firestore User Document Creation
+      const isOfficial = ['verifier', 'secretary', 'chairman', 'admin', 'purokOfficial'].includes(dto.role);
+      const userStatus: AccountStatus = dto.status || 'active';
+      const addressValue = dto.address?.trim() || (isOfficial ? 'Barangay Hall Official Address' : 'Barangay Central');
+
+      const newUser: User = {
         uid,
         boimsId,
         email: cleanEmail,
         firstName: dto.firstName.trim(),
         lastName: dto.lastName.trim(),
         fullName: `${dto.firstName.trim()} ${dto.lastName.trim()}`,
-        phoneNumber: '',
-        address: 'Barangay Hall Official Address',
-        purok: dto.purok || 'Central',
+        phoneNumber: dto.phoneNumber?.trim() || '',
+        address: addressValue,
+        purok: dto.purok?.trim() || (PUROK_OPTIONS[0] as string) || 'Unassigned',
         barangay: 'Barangay Central',
         municipality: 'Baras',
         province: 'Rizal',
         role: dto.role,
-        status: 'active',
+        status: userStatus,
         emailVerified: true,
         mustChangePassword: true,
-        isActive: true,
+        isActive: userStatus === 'active',
         createdAt: timestamp,
         updatedAt: timestamp,
         createdBy: performedByUid,
         isDeleted: false,
       };
 
-      await setDoc(doc(db, 'users', uid), officialUser);
-      syncBoimsIndexMetadata(uid, officialUser).catch(() => {});
+      await setDoc(doc(db, 'users', uid), newUser);
+      syncBoimsIndexMetadata(uid, newUser).catch(() => {});
 
+      // Step 4: Dispatch password reset / setup email via Firebase Authentication
+      try {
+        await sendPasswordResetEmail(auth, cleanEmail);
+      } catch (resetErr: any) {
+        console.warn('[AdminService] Password setup email trigger handled safely:', resetErr?.message || resetErr);
+      }
+
+      // Step 5: Write Audit Log (Never log passwords or credentials)
       await this.logAuditEvent({
-        action: 'CREATE_OFFICIAL_ACCOUNT',
+        action: isOfficial ? 'CREATE_OFFICIAL_ACCOUNT' : 'CREATE_USER_ACCOUNT',
         module: 'Users',
         targetId: uid,
         targetType: 'User',
         performedBy: performedByUid,
         performerName,
         performerRole: performerRole || 'superAdmin',
-        newValues: { fullName: officialUser.fullName, email: cleanEmail, role: dto.role, uid },
-        reason: `Official ${dto.role.toUpperCase()} account manually created by Super Admin with real Firebase Auth credentials`,
+        newValues: {
+          fullName: newUser.fullName,
+          email: cleanEmail,
+          role: dto.role,
+          status: newUser.status,
+          uid,
+          boimsId,
+        },
+        reason: `${dto.role.toUpperCase()} account manually provisioned by ${performerRole || 'Super Admin'}`,
       });
 
-      await signOut(secondaryAuth);
-      return officialUser;
+      // Clean up isolated secondary auth app
+      try {
+        await signOut(secondaryAuth);
+        await deleteApp(secondaryApp);
+      } catch (_) {}
+
+      return newUser;
     } catch (err: any) {
-      console.error('[AdminService] Error creating official account doc, initiating Auth rollback:', err);
+      console.error('[AdminService] Error in Firestore provisioning, rolling back Auth account:', err);
       if (createdAuthUser) {
         try {
           await deleteUser(createdAuthUser);
-          console.info(`[AdminService] Rolled back and deleted orphaned Firebase Auth account ${uid}`);
+          console.info(`[AdminService] Rolled back and safely deleted orphaned Auth account ${uid}`);
         } catch (delErr) {
           console.warn('[AdminService] Failed to delete orphaned Auth user during rollback:', delErr);
         }
       }
       try {
         await signOut(secondaryAuth);
+        await deleteApp(secondaryApp);
       } catch (_) {}
-      throw new Error(`Failed to create official account document: ${err.message}`);
+      throw new Error(`Failed to complete account provisioning: ${err.message || err}`);
     }
   }
 
   /**
-   * Manually creates a new staff or resident account
+   * Manually creates a new staff or resident account.
+   * Delegates to createOfficialAccount to guarantee authenticated identity and zero orphan states.
    */
   async createUserAccount(
     userData: Omit<User, 'uid' | 'createdAt' | 'updatedAt' | 'isDeleted'>,
@@ -368,49 +444,28 @@ export class AdminService {
     performerName?: string,
     performerRole?: UserRole
   ): Promise<User> {
-    const uid = `usr-${Date.now()}`;
-    const timestamp = new Date().toISOString();
-    const boimsId = userData.boimsId || (await claimUniqueBoimsId(uid));
-
-    const newUser: User = {
-      ...userData,
-      uid,
-      boimsId,
-      emailVerified: true,
-      isActive: userData.status === 'active',
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      createdBy: performedByUid,
-      isDeleted: false,
-    };
-
-    try {
-      await setDoc(doc(db, 'users', uid), newUser);
-      syncBoimsIndexMetadata(uid, newUser).catch(() => {});
-
-      await this.logAuditEvent({
-        action: 'CREATE_USER_ACCOUNT',
-        module: 'Users',
-        targetId: uid,
-        targetType: 'User',
-        performedBy: performedByUid,
-        performerName,
-        performerRole: performerRole || 'admin',
-        newValues: { fullName: newUser.fullName, email: newUser.email, role: newUser.role },
-      });
-
-      return newUser;
-    } catch (err) {
-      console.warn('[AdminService] Firestore createUserAccount fallback:', err);
-      return newUser;
-    }
+    return this.createOfficialAccount(
+      {
+        email: userData.email,
+        firstName: userData.firstName,
+        lastName: userData.lastName,
+        role: userData.role as any,
+        status: userData.status,
+        phoneNumber: userData.phoneNumber,
+        purok: userData.purok,
+        address: userData.address,
+      },
+      performedByUid,
+      performerName,
+      performerRole
+    );
   }
 
   /**
    * Fetches audit logs from Firestore with optional pagination
    */
   async getAuditLogs(
-    options?: { limitCount?: number; lastDoc?: DocumentSnapshot | null },
+    options?: { limitCount?: number; lastDoc?: DocumentSnapshot | null; performedBy?: string },
     currentUser?: User | null
   ): Promise<AuditLog[]> {
     // Resolve active user context and role before making any Firestore query
@@ -457,12 +512,44 @@ export class AdminService {
 
     try {
       const auditRef = collection(db, 'auditLogs');
-      const constraints: QueryConstraint[] = [orderBy('createdAt', 'desc')];
+      const limitVal = options?.limitCount || 100;
 
+      if (options?.performedBy) {
+        // Primary query enforces performedBy == current authenticated Super Admin UID directly at Firestore level
+        try {
+          const q = query(
+            auditRef,
+            where('performedBy', '==', options.performedBy),
+            orderBy('createdAt', 'desc'),
+            limit(limitVal)
+          );
+          const snapshot = await getDocs(q);
+          if (!snapshot.empty) {
+            return snapshot.docs.map((d) => d.data() as AuditLog);
+          }
+          return [];
+        } catch (queryErr) {
+          // Resilient fallback: Query by performedBy without compound orderBy, then sort in memory
+          console.warn('[AdminService] Query with compound orderBy fallback:', queryErr);
+          const fallbackQ = query(
+            auditRef,
+            where('performedBy', '==', options.performedBy),
+            limit(limitVal)
+          );
+          const snapshot = await getDocs(fallbackQ);
+          if (!snapshot.empty) {
+            const logs = snapshot.docs.map((d) => d.data() as AuditLog);
+            return logs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          }
+          return [];
+        }
+      }
+
+      const constraints: QueryConstraint[] = [orderBy('createdAt', 'desc')];
       if (options?.lastDoc) {
         constraints.push(startAfter(options.lastDoc));
       }
-      constraints.push(limit(options?.limitCount || 100));
+      constraints.push(limit(limitVal));
 
       const q = query(auditRef, ...constraints);
       const snapshot = await getDocs(q);

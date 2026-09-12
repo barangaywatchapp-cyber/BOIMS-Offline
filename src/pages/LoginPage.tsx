@@ -29,7 +29,11 @@ export const LoginPage: React.FC = () => {
   // If already authenticated and active, redirect directly to role dashboard
   useEffect(() => {
     if (isAuthenticated && user && user.status === 'active') {
-      navigate(getRoleDashboardRoute(role || user.role), { replace: true });
+      if (user.mustChangePassword) {
+        navigate(ROUTES.SETUP_PASSWORD, { replace: true });
+      } else {
+        navigate(getRoleDashboardRoute(role || user.role), { replace: true });
+      }
     }
   }, [isAuthenticated, user, role, navigate]);
 
@@ -53,6 +57,9 @@ export const LoginPage: React.FC = () => {
       } else if (loginResult.status === 'rejected') {
         showToast('Your registration application was rejected by Barangay Administration.', 'error');
         navigate(ROUTES.PENDING_VERIFICATION, { replace: true });
+      } else if (profile?.mustChangePassword) {
+        showToast('First login detected. Please set up your permanent password to continue.', 'info');
+        navigate(ROUTES.SETUP_PASSWORD, { replace: true });
       } else {
         showToast(`Login successful. Welcome back, ${profile?.firstName || 'User'}!`, 'success');
 

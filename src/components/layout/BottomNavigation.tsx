@@ -8,10 +8,87 @@ import { NavLink } from 'react-router-dom';
 import { ROUTES } from '../../constants';
 import { useAuth } from '../../contexts/AuthContext';
 import { isResidentMode } from '../../utils/permissions';
-import { LayoutDashboard, FileText, PlusCircle, Bell, User } from 'lucide-react';
+import {
+  LayoutDashboard,
+  FileText,
+  PlusCircle,
+  Bell,
+  User,
+  Users,
+  History,
+  RefreshCw,
+  ShieldCheck,
+} from 'lucide-react';
 
 export const BottomNavigation: React.FC = () => {
   const { user, role } = useAuth();
+
+  // Dedicated Mobile Navigation for Super Admin
+  if (role === 'superAdmin') {
+    return (
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-slate-200 shadow-lg px-2 py-1 flex items-center justify-around">
+        <NavLink
+          to={ROUTES.USERS}
+          className={({ isActive }) =>
+            `flex flex-col items-center justify-center p-2 rounded-lg text-[10px] font-medium transition-colors ${
+              isActive ? 'text-blue-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+            }`
+          }
+        >
+          <Users className="w-5 h-5 mb-0.5" />
+          <span>Users</span>
+        </NavLink>
+
+        <NavLink
+          to={ROUTES.ADMIN_HISTORY}
+          className={({ isActive }) =>
+            `flex flex-col items-center justify-center p-2 rounded-lg text-[10px] font-medium transition-colors ${
+              isActive ? 'text-blue-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+            }`
+          }
+        >
+          <History className="w-5 h-5 mb-0.5" />
+          <span>History</span>
+        </NavLink>
+
+        <NavLink
+          to={ROUTES.OFFLINE_SYNC}
+          className={({ isActive }) =>
+            `flex flex-col items-center justify-center p-2 rounded-lg text-[10px] font-medium transition-colors ${
+              isActive ? 'text-blue-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+            }`
+          }
+        >
+          <RefreshCw className="w-5 h-5 mb-0.5" />
+          <span>Sync</span>
+        </NavLink>
+
+        <NavLink
+          to={ROUTES.SYSTEM_HEALTH}
+          className={({ isActive }) =>
+            `flex flex-col items-center justify-center p-2 rounded-lg text-[10px] font-medium transition-colors ${
+              isActive ? 'text-blue-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+            }`
+          }
+        >
+          <ShieldCheck className="w-5 h-5 mb-0.5" />
+          <span>Readiness</span>
+        </NavLink>
+
+        <NavLink
+          to={ROUTES.PROFILE}
+          className={({ isActive }) =>
+            `flex flex-col items-center justify-center p-2 rounded-lg text-[10px] font-medium transition-colors ${
+              isActive ? 'text-blue-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+            }`
+          }
+        >
+          <User className="w-5 h-5 mb-0.5" />
+          <span>Profile</span>
+        </NavLink>
+      </nav>
+    );
+  }
 
   const getQuickActionRoute = () => {
     if (isResidentMode(user, role)) return ROUTES.REPORT_CREATE;

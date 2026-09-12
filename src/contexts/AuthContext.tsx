@@ -40,6 +40,7 @@ interface AuthContextType {
   hasPermission: (module: string, action: string) => boolean;
   hasActiveDispatcher: (excludeUid?: string) => Promise<boolean>;
   canViewResidentQueue: () => Promise<boolean>;
+  completePasswordSetup: (newPassword: string, currentPassword?: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -142,6 +143,7 @@ function areUsersEquivalent(prev: User | null, next: User | null): boolean {
     prev.isActive !== next.isActive ||
     prev.isDeleted !== next.isDeleted ||
     prev.emailVerified !== next.emailVerified ||
+    prev.mustChangePassword !== next.mustChangePassword ||
     prev.presence?.status !== next.presence?.status
   ) {
     return false;
@@ -582,8 +584,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!user) return false;
     const { role } = user;
 
-    // SuperAdmin, Chairman & Admin have full oversight over operational modules
-    if (role === 'superAdmin' || role === 'chairman' || role === 'admin') return true;
+    // Dedicated Super Admin authorization scope:
+    // Strictly limited to User Management, Admin History, System Status, and Profile.
+    // Operational modules (reports, certificates, announcements, notifications, registrations, residents, dispatch) are not accessible.
+    if (role === 'superAdmin') {
+      if (
+        module === 'users' ||
+        module === 'adminHistory' ||
+        module === 'auditLogs' ||
+        module === 'offlineSync' ||
+        module === 'systemHealth' ||
+        module === 'profile'
+      ) {
+        return true;
+      }
+      return false;
+    }
+
+    // Chairman & Admin have full oversight over operational modules
+    if (role === 'chairman' || role === 'admin') return true;
 
     // Verifier role is strictly limited to Identity Verification module
     if (role === 'verifier') {
@@ -621,6 +640,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return true; // Default fallback for basic modules
   };
 
+  /**
+   * Completes first-login password setup and clears mustChangePassword flag.
+   */
+  const completePasswordSetup = async (newPassword: string, currentPassword?: string): Promise<void> => {
+    setLoading(true);
+    try {
+      await authService.completePasswordSetup(newPassword, currentPassword);
+      if (user) {
+        const updated: User = {
+          ...user,
+          mustChangePassword: false,
+          updatedAt: new Date().toISOString(),
+        };
+        safeSetUserLocalStorage(updated);
+        await persistOfflineSession(updated, 'online_authenticated');
+        setUser(updated);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -636,6 +677,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         hasPermission,
         hasActiveDispatcher,
         canViewResidentQueue,
+        completePasswordSetup,
       }}
     >
       {children}
