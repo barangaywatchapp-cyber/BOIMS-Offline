@@ -179,9 +179,7 @@ export const UserManagementPage: React.FC = () => {
         currentUser.role
       );
 
-      const noticeMessage = result.notice
-        ? `Account for ${targetDisplayName}${targetEmail ? ` (${targetEmail})` : ''} has been permanently deleted from Firebase Auth and BOIMS. Email address liberated.`
-        : `Account for ${targetDisplayName} has been successfully deleted.`;
+      const noticeMessage = result.notice || `Account for ${targetDisplayName} has been successfully deleted.`;
 
       showToast(noticeMessage, 'success');
 
