@@ -26,6 +26,7 @@ import {
   OFFLINE_SESSION_SCHEMA_VERSION,
 } from '../offline/types';
 import { isAppOnline } from '../offline/networkManager';
+import { ROUTES } from '../constants';
 
 interface AuthContextType {
   user: User | null;
@@ -301,9 +302,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                   persistOfflineSession(tempUser, 'online_authenticated').catch(() => {});
                   setUser(tempUser);
                 } else {
+                  // The user record in users/{uid} does not exist (account was deleted or revoked).
+                  // Intercept session immediately: persist flash message, sign out from Firebase Auth, and redirect to LoginPage.
+                  try {
+                    sessionStorage.setItem('auth_revoked_message', 'Your account has been revoked or deleted by the administrator.');
+                    await signOut(auth);
+                  } catch (signOutErr) {
+                    console.warn('[AuthContext] Error signing out revoked user:', signOutErr);
+                  }
                   safeSetUserLocalStorage(null);
                   offlineStorage.clearSession().catch(() => {});
                   setUser(null);
+                  if (typeof window !== 'undefined' && window.location.pathname !== ROUTES.LOGIN && window.location.pathname !== ROUTES.REGISTER) {
+                    window.location.replace(ROUTES.LOGIN);
+                  }
                 }
               }
               setIsAuthInitialized(true);

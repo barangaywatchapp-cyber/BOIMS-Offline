@@ -8,7 +8,8 @@
 import React, { useState } from 'react';
 import { useNavigate, NavLink } from 'react-router-dom';
 import { createUserWithEmailAndPassword, sendEmailVerification, deleteUser } from 'firebase/auth';
-import { auth } from '../firebase/config';
+import { auth, db } from '../firebase/config';
+import { collection, query, where, getDocs } from 'firebase/firestore';
 import { registrationService } from '../services/registrationService';
 import { validateRegistrationDocumentFile } from '../services/storageService';
 import { UserRole, ResidentSector, VoterStatus } from '../types';
@@ -399,6 +400,27 @@ export const RegisterPage: React.FC = () => {
       const cleanEmail = email.trim().toLowerCase();
       const targetRole: UserRole = registrationType === 'purokOfficial' ? 'purokOfficial' : 'resident';
       const fullName = [firstName, middleName, lastName, suffix].filter(Boolean).join(' ').trim();
+
+      // Duplicate Check & Archived Bypass:
+      // Query the Firestore users collection for existing matching email.
+      // If a document matching that email exists and status === "archived_deleted",
+      // ignore that document entirely, treat the email as completely available and unblocked,
+      // and proceed to invoke createUserWithEmailAndPassword normally.
+      const usersQuery = query(collection(db, 'users'), where('email', '==', cleanEmail));
+      const existingUsersSnap = await getDocs(usersQuery);
+
+      if (!existingUsersSnap.empty) {
+        const activeUserDoc = existingUsersSnap.docs.find((docSnap) => {
+          const data = docSnap.data();
+          return data.status !== 'archived_deleted';
+        });
+
+        if (activeUserDoc) {
+          setError('This email address is already registered in BOIMS. If you previously registered, please sign in to complete verification or reset your password.');
+          setLoading(false);
+          return;
+        }
+      }
 
       // Step 1: Create Firebase Auth user account
       const userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, password);

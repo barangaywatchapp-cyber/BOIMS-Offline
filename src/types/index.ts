@@ -16,7 +16,7 @@ export type UserRole =
 
 export type RegistrationType = 'resident' | 'purokOfficial';
 
-export type AccountStatus = 'pending' | 'active' | 'suspended';
+export type AccountStatus = 'pending' | 'active' | 'suspended' | 'inactive' | 'archived_deleted';
 
 export type RegistrationStatus =
   | 'pending'
@@ -132,6 +132,8 @@ export interface User {
   isDeleted: boolean;
   deletedAt?: string | null;
   deletedBy?: string;
+  archivedAt?: string;
+  primaryEmailLookup?: string;
 }
 
 export type IncidentCategory =

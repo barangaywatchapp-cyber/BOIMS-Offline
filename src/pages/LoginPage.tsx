@@ -26,6 +26,16 @@ export const LoginPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // Check for session flash messages (e.g. account revoked or deleted by administrator)
+  useEffect(() => {
+    const flashMessage = sessionStorage.getItem('auth_revoked_message');
+    if (flashMessage) {
+      sessionStorage.removeItem('auth_revoked_message');
+      setError(flashMessage);
+      showToast(flashMessage, 'error');
+    }
+  }, [showToast]);
+
   // If already authenticated and active, redirect directly to role dashboard
   useEffect(() => {
     if (isAuthenticated && user && user.status === 'active') {

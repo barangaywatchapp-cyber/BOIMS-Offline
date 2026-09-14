@@ -11,6 +11,7 @@ import {
   setDoc,
   updateDoc,
   addDoc,
+  deleteDoc,
   query,
   where,
   orderBy,
@@ -288,6 +289,58 @@ export class AdminService {
       console.error('[AdminService] Error updating user role/status:', err);
       throw err;
     }
+  }
+
+  /**
+   * Super Admin account deletion & Firebase Auth liberation.
+   * Sends an authenticated request to the secure server endpoint:
+   * DELETE /api/admin/users/:uid
+   * The server cryptographically validates the caller's Firebase ID token,
+   * authoritatively checks for role === 'superAdmin' in Firestore,
+   * enforces self-deletion and protected account safeguards,
+   * deletes the Firebase Auth identity via authAdmin.deleteUser(targetUid),
+   * updates the Firestore record to 'archived_deleted', and logs an audit event.
+   */
+  async deleteUserAccount(
+    targetUid: string,
+    _performedByUid?: string,
+    _performerName?: string,
+    _performerRole?: UserRole
+  ): Promise<{ success: boolean; authDeleted?: boolean; notice?: string }> {
+    if (!targetUid || typeof targetUid !== 'string') {
+      throw new Error('Target user UID is required for deletion.');
+    }
+
+    const currentAuthUser = auth.currentUser;
+    if (!currentAuthUser) {
+      throw new Error('Authentication required: Current user session is missing or expired.');
+    }
+
+    const idToken = await currentAuthUser.getIdToken();
+    if (!idToken) {
+      throw new Error('Failed to retrieve Firebase ID token for Super Admin authorization.');
+    }
+
+    const response = await fetch(`/api/admin/users/${encodeURIComponent(targetUid)}`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+    });
+
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const errorMsg = result.message || result.error || `Deletion failed with HTTP status ${response.status}`;
+      throw new Error(errorMsg);
+    }
+
+    return {
+      success: true,
+      authDeleted: Boolean(result.authDeleted),
+      notice: result.message,
+    };
   }
 
   /**

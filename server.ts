@@ -1247,6 +1247,161 @@ async function startServer() {
     }
   }
 
+  // =========================================================================
+  // SUPER ADMIN USER ACCOUNT DELETION & FIREBASE AUTH LIBERATION ENDPOINT
+  // =========================================================================
+  /**
+   * DELETE /api/admin/users/:uid
+   * Authoritative Super Admin account deletion endpoint.
+   * Securely deletes user from Firebase Authentication and archives Firestore record.
+   */
+  app.delete('/api/admin/users/:uid', async (req, res) => {
+    try {
+      // 1. Authenticate caller cryptographically via Firebase Admin verifyIdToken
+      const authUser = await authenticateRequest(req, res);
+      if (!authUser) return; // 401 response already transmitted by authenticateRequest
+
+      // 2. Authoritative Super Admin check:
+      // Only genuine superAdmin accounts are permitted. Admin, Chairman, Secretary, etc., are rejected.
+      if (authUser.role !== 'superAdmin') {
+        return res.status(403).json({
+          error: 'forbidden',
+          message: 'Access denied: Only authenticated Super Administrators can execute account deletions.',
+        });
+      }
+
+      // 3. Target parameter validation and safeguards
+      const targetUid = req.params.uid ? String(req.params.uid).trim() : '';
+      if (!targetUid || targetUid.length < 5) {
+        return res.status(400).json({
+          error: 'invalid_target',
+          message: 'A valid target user UID must be provided in the route parameters.',
+        });
+      }
+
+      // Safeguard 1: Prevent self-deletion
+      if (authUser.uid === targetUid) {
+        return res.status(400).json({
+          error: 'self_deletion_prohibited',
+          message: 'Self-deletion prohibited: Super Administrators cannot delete their own active administrator account.',
+        });
+      }
+
+      // Retrieve target Firestore profile for metadata, protected account checks, and audit logging
+      let targetDocData: any = null;
+      try {
+        const targetDoc = await db.collection('users').doc(targetUid).get();
+        if (targetDoc.exists) {
+          targetDocData = targetDoc.data();
+        }
+      } catch (err: any) {
+        console.warn(`[Server Delete] Error retrieving target user ${targetUid} profile from Firestore:`, err?.message || err);
+      }
+
+      // Safeguard 2: Protected system accounts (prevent deleting another superAdmin)
+      if (targetDocData && targetDocData.role === 'superAdmin') {
+        return res.status(403).json({
+          error: 'protected_account',
+          message: 'Protected account: Super Administrator accounts cannot be deleted via user management.',
+        });
+      }
+
+      const targetFullName = targetDocData?.fullName || targetDocData?.displayName || targetDocData?.email || targetUid;
+      const targetEmail = targetDocData?.email ? String(targetDocData.email).trim() : '';
+      const targetRole = targetDocData?.role || 'unknown';
+      const targetStatus = targetDocData?.status || 'unknown';
+
+      // 4. Actual Firebase Auth deletion using authAdmin.deleteUser
+      let authDeleted = false;
+      let authAlreadyMissing = false;
+
+      try {
+        await authAdmin.deleteUser(targetUid);
+        authDeleted = true;
+        console.info(`[Server Delete] Successfully deleted Firebase Auth account for UID: ${targetUid}`);
+      } catch (authErr: any) {
+        if (authErr?.code === 'auth/user-not-found') {
+          console.info(`[Server Delete] Firebase Auth user ${targetUid} was not found in Auth pool (already deleted or unprovisioned).`);
+          authAlreadyMissing = true;
+        } else {
+          console.error(`[Server Delete] Failed to delete Firebase Auth account ${targetUid}:`, authErr);
+          return res.status(500).json({
+            error: 'auth_deletion_failed',
+            message: `Failed to delete Firebase Authentication account: ${authErr?.message || authErr}`,
+          });
+        }
+      }
+
+      // 5. Firestore Cleanup: mark status: 'archived_deleted', clear primaryEmailLookup
+      let firestoreUpdated = false;
+      try {
+        await db.collection('users').doc(targetUid).set({
+          status: 'archived_deleted',
+          archivedAt: new Date().toISOString(),
+          primaryEmailLookup: '',
+          updatedAt: new Date().toISOString(),
+          updatedBy: authUser.uid,
+        }, { merge: true });
+        firestoreUpdated = true;
+      } catch (fsErr: any) {
+        console.error(`[Server Delete] Firestore update to archived_deleted failed for ${targetUid}:`, fsErr);
+      }
+
+      // Subordinate collections cleanup
+      try {
+        await db.collection('registrations').doc(targetUid).delete();
+      } catch (regErr: any) {
+        console.warn(`[Server Delete] Subordinate registrations/${targetUid} delete notice:`, regErr?.message || regErr);
+      }
+
+      try {
+        await db.collection('userBoimsIndexes').doc(targetUid).delete();
+      } catch (idxErr: any) {
+        console.warn(`[Server Delete] Subordinate userBoimsIndexes/${targetUid} delete notice:`, idxErr?.message || idxErr);
+      }
+
+      // 6. Immutable Audit Logging
+      try {
+        const auditId = `AUD-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+        const auditRecord = {
+          auditId,
+          action: 'DELETE_USER_ACCOUNT',
+          module: 'Users',
+          targetId: targetUid,
+          targetType: 'User',
+          targetName: targetFullName,
+          performedBy: authUser.uid,
+          performerName: authUser.email || 'Super Administrator',
+          performerRole: 'superAdmin',
+          previousValues: targetDocData ? { role: targetRole, status: targetStatus, email: targetEmail } : undefined,
+          reason: `Administrative account deletion and Firebase Auth liberation executed by superAdmin (${authUser.uid})`,
+          createdAt: new Date().toISOString(),
+        };
+
+        await db.collection('auditLogs').doc(auditId).set(auditRecord);
+      } catch (auditErr: any) {
+        console.warn('[Server Delete] Failed to record deletion audit event to Firestore:', auditErr?.message || auditErr);
+      }
+
+      return res.status(200).json({
+        success: true,
+        targetUid,
+        authDeleted,
+        authAlreadyMissing,
+        firestoreUpdated,
+        message: authDeleted
+          ? `User account and Firebase Auth identity for ${targetFullName} permanently deleted. Email address liberated.`
+          : `User account archived and email lookup released (Auth record was already absent).`,
+      });
+    } catch (err: any) {
+      console.error('[Server Delete] Unexpected error during account deletion:', err);
+      return res.status(500).json({
+        error: 'internal_deletion_error',
+        message: 'Internal server error executing user account deletion.',
+      });
+    }
+  });
+
   // 1. Device Token Registration Endpoint (Authenticated & Owner-Bound)
   app.post('/api/fcm/register-token', async (req, res) => {
     try {

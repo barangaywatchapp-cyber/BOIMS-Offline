@@ -138,8 +138,11 @@ export class AuthService {
         }
       }
 
-      // Step 4: If neither users/{uid} nor registrations exist, throw error
-      throw new Error('User profile or registration record not found. Please contact administration.');
+      // Step 4: If neither users/{uid} nor registrations exist, revoke Auth session and throw
+      try {
+        await signOut(auth);
+      } catch (_) {}
+      throw new Error('Your account has been revoked or deleted by the administrator.');
     } catch (error: any) {
       if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
         throw new Error('Invalid email or password. Please check your credentials.');

@@ -11,6 +11,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { adminService } from '../services/adminService';
 import { formatPresenceDisplay, OFFICIAL_ROLES } from '../services/presenceService';
@@ -41,10 +42,12 @@ import {
   Lock,
   WifiOff,
   History,
+  Trash2,
 } from 'lucide-react';
 
 export const UserManagementPage: React.FC = () => {
   const { user: currentUser, role: currentRole, isAuthInitialized } = useAuth();
+  const { showToast } = useToast();
   const isOnline = useOnlineStatus();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -56,6 +59,8 @@ export const UserManagementPage: React.FC = () => {
   const [showEditModal, setShowEditModal] = useState<boolean>(false);
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [showDetailModal, setShowDetailModal] = useState<boolean>(false);
+  const [deleteLoading, setDeleteLoading] = useState<boolean>(false);
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState<boolean>(false);
 
   // Edit Role/Status state
   const [editRole, setEditRole] = useState<UserRole>('resident');
@@ -121,9 +126,75 @@ export const UserManagementPage: React.FC = () => {
         currentUser.role
       );
       setShowEditModal(false);
-      alert(`User account for ${selectedUser.fullName} has been updated.`);
+      showToast(`User account for ${selectedUser.fullName} has been updated.`, 'success');
     } catch (err) {
-      alert('Error updating user: ' + (err as Error).message);
+      showToast('Error updating user: ' + (err as Error).message, 'error');
+    }
+  };
+
+  const handleInitiateDelete = () => {
+    if (!selectedUser || !currentUser) return;
+    if (selectedUser.uid === currentUser.uid) {
+      showToast('You cannot delete your own active administrator account.', 'error');
+      return;
+    }
+    if (currentUser.role !== 'superAdmin') {
+      showToast('Access denied: Only Super Administrators are authorized to delete user accounts.', 'error');
+      return;
+    }
+    setIsConfirmingDelete(true);
+  };
+
+  const handleCancelDelete = () => {
+    setIsConfirmingDelete(false);
+  };
+
+  const handleExecuteDelete = async () => {
+    if (!selectedUser || !currentUser) return;
+
+    if (selectedUser.uid === currentUser.uid) {
+      showToast('You cannot delete your own active administrator account.', 'error');
+      setIsConfirmingDelete(false);
+      return;
+    }
+
+    if (currentUser.role !== 'superAdmin') {
+      showToast('Access denied: Only Super Administrators are authorized to delete user accounts.', 'error');
+      setIsConfirmingDelete(false);
+      return;
+    }
+
+    const targetUid = selectedUser.uid;
+    const targetEmail = selectedUser.email ? selectedUser.email.trim() : '';
+    const targetDisplayName = selectedUser.fullName || selectedUser.email;
+
+    setDeleteLoading(true);
+
+    try {
+      // Authoritative Deletion via adminService -> server.ts (Firebase Admin Auth deletion)
+      const result = await adminService.deleteUserAccount(
+        targetUid,
+        currentUser.uid,
+        currentUser.fullName,
+        currentUser.role
+      );
+
+      const noticeMessage = result.notice
+        ? `Account for ${targetDisplayName}${targetEmail ? ` (${targetEmail})` : ''} has been permanently deleted from Firebase Auth and BOIMS. Email address liberated.`
+        : `Account for ${targetDisplayName} has been successfully deleted.`;
+
+      showToast(noticeMessage, 'success');
+
+      setIsConfirmingDelete(false);
+      setShowEditModal(false);
+      setSelectedUser(null);
+      // Immediately evict user record from active grid memory state
+      setUsers((prev) => prev.filter((u) => u.uid !== targetUid));
+    } catch (err: any) {
+      console.error('Error executing user deletion:', err);
+      showToast('Error deleting user account: ' + (err.message || err), 'error');
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -132,7 +203,7 @@ export const UserManagementPage: React.FC = () => {
     if (!currentUser) return;
 
     if (!formData.purok || !formData.purok.trim()) {
-      alert('Please select a valid Purok jurisdiction.');
+      showToast('Please select a valid Purok jurisdiction.', 'error');
       return;
     }
 
@@ -164,9 +235,9 @@ export const UserManagementPage: React.FC = () => {
         role: 'verifier' as UserRole,
         status: 'active',
       });
-      alert('Account created successfully. The user will be prompted to set/change their password on first login.');
+      showToast('Account created successfully. The user will be prompted to set/change their password on first login.', 'success');
     } catch (err) {
-      alert('Error creating user account: ' + (err as Error).message);
+      showToast('Error creating user account: ' + (err as Error).message, 'error');
     }
   };
 
@@ -441,6 +512,7 @@ export const UserManagementPage: React.FC = () => {
                                 setSelectedUser(u);
                                 setEditRole(u.role);
                                 setEditStatus(u.status);
+                                setIsConfirmingDelete(false);
                                 setShowEditModal(true);
                               }}
                               className="text-xs flex items-center gap-1"
@@ -566,13 +638,77 @@ export const UserManagementPage: React.FC = () => {
                 <strong>Audit Note:</strong> Any modifications to user roles or status will be permanently logged in the System Audit Trail.
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
-                <Button type="button" variant="secondary" size="sm" onClick={() => setShowEditModal(false)}>
-                  Cancel
-                </Button>
-                <Button type="submit" variant="primary" size="sm" disabled={!isOnline}>
-                  {isOnline ? 'Save Changes' : 'Offline - Changes Disabled'}
-                </Button>
+              {/* Inline Deletion Confirmation Box */}
+              {isConfirmingDelete && (
+                <div className="bg-red-50 p-3.5 rounded-xl border border-red-200 text-xs text-red-900 space-y-2.5">
+                  <div className="font-bold flex items-center gap-1.5 text-red-800">
+                    <Trash2 className="w-4 h-4 text-red-600 shrink-0" />
+                    Confirm permanent account deletion & email liberation?
+                  </div>
+                  <p className="text-red-700 leading-relaxed">
+                    This will permanently delete the account for <strong>{selectedUser.fullName || selectedUser.email}</strong> from <strong>Firebase Authentication</strong> (releasing their email for future registration) and <strong>Firestore</strong>.
+                  </p>
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleExecuteDelete}
+                      disabled={!isOnline || deleteLoading}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 rounded-lg transition-colors disabled:opacity-50 cursor-pointer shadow-xs"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      {deleteLoading ? 'Deleting Account & Liberating Email...' : 'Yes, Delete Account'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCancelDelete}
+                      disabled={deleteLoading}
+                      className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg transition-colors cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+                <div>
+                  {!isConfirmingDelete && (
+                    <div>
+                      {selectedUser.uid === currentUser.uid ? (
+                        <span className="text-xs text-slate-400 italic" title="You cannot delete your own active administrator account.">
+                          Self-deletion disabled
+                        </span>
+                      ) : currentUser.role === 'superAdmin' ? (
+                        <button
+                          type="button"
+                          onClick={handleInitiateDelete}
+                          disabled={!isOnline || deleteLoading}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-red-700 bg-red-50 hover:bg-red-100 active:bg-red-200 border border-red-200 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                          title="Permanently delete this account and liberate email"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-red-600" />
+                          Delete Account
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setIsConfirmingDelete(false);
+                      setShowEditModal(false);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button type="submit" variant="primary" size="sm" disabled={!isOnline || deleteLoading || isConfirmingDelete}>
+                    {isOnline ? 'Save Changes' : 'Offline - Changes Disabled'}
+                  </Button>
+                </div>
               </div>
             </form>
           </div>
