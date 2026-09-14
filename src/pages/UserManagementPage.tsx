@@ -103,7 +103,9 @@ export const UserManagementPage: React.FC = () => {
 
     setLoading(true);
     const unsubscribe = adminService.subscribeToUsers((data) => {
-      setUsers(data);
+      // Defensive filtering: ensure deleted/archived accounts (isDeleted === true or status === 'archived_deleted') are not displayed in the active user list
+      const activeUsers = data.filter((u) => !u.isDeleted && u.status !== 'archived_deleted');
+      setUsers(activeUsers);
       setLoading(false);
     }, currentUser);
 
@@ -142,6 +144,10 @@ export const UserManagementPage: React.FC = () => {
       showToast('Access denied: Only Super Administrators are authorized to delete user accounts.', 'error');
       return;
     }
+    if (selectedUser.role === 'superAdmin') {
+      showToast('Protected account: Super Administrator accounts cannot be deleted.', 'error');
+      return;
+    }
     setIsConfirmingDelete(true);
   };
 
@@ -164,14 +170,17 @@ export const UserManagementPage: React.FC = () => {
       return;
     }
 
-    const targetUid = selectedUser.uid;
-    const targetEmail = selectedUser.email ? selectedUser.email.trim() : '';
-    const targetDisplayName = selectedUser.fullName || selectedUser.email;
+    if (selectedUser.role === 'superAdmin') {
+      showToast('Protected account: Super Administrator accounts cannot be deleted.', 'error');
+      setIsConfirmingDelete(false);
+      return;
+    }
 
+    const targetUid = selectedUser.uid;
     setDeleteLoading(true);
 
     try {
-      // Authoritative Deletion via adminService -> server.ts (Firebase Admin Auth deletion)
+      // Authoritative Deletion via adminService -> server.ts (Firebase Admin Auth deletion is mandatory gate)
       const result = await adminService.deleteUserAccount(
         targetUid,
         currentUser.uid,
@@ -179,15 +188,23 @@ export const UserManagementPage: React.FC = () => {
         currentUser.role
       );
 
-      const noticeMessage = result.notice || `Account for ${targetDisplayName} has been successfully deleted.`;
+      if (result && result.success === true) {
+        // Authoritative server notification
+        const serverNotice =
+          result.notice ||
+          result.message ||
+          'User account has been successfully deleted.';
 
-      showToast(noticeMessage, 'success');
+        showToast(serverNotice, 'success');
 
-      setIsConfirmingDelete(false);
-      setShowEditModal(false);
-      setSelectedUser(null);
-      // Immediately evict user record from active grid memory state
-      setUsers((prev) => prev.filter((u) => u.uid !== targetUid));
+        setIsConfirmingDelete(false);
+        setShowEditModal(false);
+        setSelectedUser(null);
+        // Immediately evict user record from active grid memory state
+        setUsers((prev) => prev.filter((u) => u.uid !== targetUid));
+      } else {
+        throw new Error(result?.message || result?.notice || 'Deletion request was not confirmed by the server.');
+      }
     } catch (err: any) {
       console.error('Error executing user deletion:', err);
       showToast('Error deleting user account: ' + (err.message || err), 'error');
@@ -675,6 +692,10 @@ export const UserManagementPage: React.FC = () => {
                       {selectedUser.uid === currentUser.uid ? (
                         <span className="text-xs text-slate-400 italic" title="You cannot delete your own active administrator account.">
                           Self-deletion disabled
+                        </span>
+                      ) : selectedUser.role === 'superAdmin' ? (
+                        <span className="text-xs text-slate-400 italic" title="Super Administrator accounts cannot be deleted.">
+                          Protected account (Super Admin)
                         </span>
                       ) : currentUser.role === 'superAdmin' ? (
                         <button

@@ -1338,7 +1338,7 @@ async function startServer() {
       const targetRole = targetDocData?.role || 'unknown';
       const targetStatus = targetDocData?.status || 'unknown';
 
-      // 4. Firebase Auth deletion attempt
+      // 4. Firebase Auth deletion attempt (Mandatory & Authoritative gate)
       let authDeleted = false;
       let authAlreadyMissing = false;
 
@@ -1348,22 +1348,28 @@ async function startServer() {
         console.info(`[Server Delete] Successfully deleted Firebase Auth account for UID: ${targetUid}`);
       } catch (authErr: any) {
         if (authErr?.code === 'auth/user-not-found') {
-          console.info(`[Server Delete] Firebase Auth user ${targetUid} was not found in Auth pool (already deleted or unprovisioned).`);
+          console.info(`[Server Delete] Firebase Auth user ${targetUid} was not found in Auth pool (already absent).`);
           authAlreadyMissing = true;
         } else {
-          // Cloud Run sandbox environments without a GCP Service Account key for the target Firebase project
-          // cannot invoke authAdmin.deleteUser. We log the diagnostic and proceed with Firestore archival.
-          console.warn(`[Server Delete] Firebase Auth Admin SDK deletion bypassed (${authErr?.message || authErr}). Proceeding with Firestore account archival & email liberation.`);
+          console.error(`[Server Delete] Failed to delete Firebase Auth account ${targetUid} (${authErr?.code || 'unknown_code'}):`, authErr?.message || authErr);
+          return res.status(500).json({
+            success: false,
+            authDeleted: false,
+            authAlreadyMissing: false,
+            targetUid,
+            message: 'Firebase Authentication account could not be deleted. No Firestore deletion/archival was performed.',
+          });
         }
       }
 
-      // 5. Firestore Cleanup: mark status: 'archived_deleted', clear primaryEmailLookup
+      // 5. Firestore Archival & Cleanup (Only executed if Auth was deleted or already absent)
       let firestoreUpdated = false;
       const nowIso = new Date().toISOString();
 
       try {
         await db.collection('users').doc(targetUid).set({
           status: 'archived_deleted',
+          isDeleted: true,
           archivedAt: nowIso,
           primaryEmailLookup: '',
           updatedAt: nowIso,
@@ -1375,7 +1381,7 @@ async function startServer() {
         if (firebaseProjectId && authUser.token) {
           try {
             const restPatchRes = await fetch(
-              `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/users/${targetUid}?updateMask.fieldPaths=status&updateMask.fieldPaths=archivedAt&updateMask.fieldPaths=primaryEmailLookup&updateMask.fieldPaths=updatedAt&updateMask.fieldPaths=updatedBy`,
+              `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/users/${targetUid}?updateMask.fieldPaths=status&updateMask.fieldPaths=isDeleted&updateMask.fieldPaths=archivedAt&updateMask.fieldPaths=primaryEmailLookup&updateMask.fieldPaths=updatedAt&updateMask.fieldPaths=updatedBy`,
               {
                 method: 'PATCH',
                 headers: {
@@ -1385,6 +1391,7 @@ async function startServer() {
                 body: JSON.stringify({
                   fields: {
                     status: { stringValue: 'archived_deleted' },
+                    isDeleted: { booleanValue: true },
                     archivedAt: { stringValue: nowIso },
                     primaryEmailLookup: { stringValue: '' },
                     updatedAt: { stringValue: nowIso },
@@ -1449,7 +1456,16 @@ async function startServer() {
           performerName: authUser.email || 'Super Administrator',
           performerRole: 'superAdmin',
           previousValues: targetDocData ? { role: targetRole, status: targetStatus, email: targetEmail } : undefined,
-          reason: `Administrative account deletion and email liberation executed by superAdmin (${authUser.uid})`,
+          newValues: {
+            status: 'archived_deleted',
+            isDeleted: true,
+            authDeleted,
+            authAlreadyMissing,
+            primaryEmailLookup: '',
+          },
+          reason: authDeleted
+            ? `Administrative account deletion and Firebase Auth liberation executed by superAdmin (${authUser.uid})`
+            : `Administrative account archival executed by superAdmin (${authUser.uid}); Firebase Auth identity was already absent`,
           createdAt: nowIso,
         };
 
@@ -1476,7 +1492,11 @@ async function startServer() {
                     performedBy: { stringValue: authUser.uid },
                     performerName: { stringValue: authUser.email || 'Super Administrator' },
                     performerRole: { stringValue: 'superAdmin' },
-                    reason: { stringValue: `Administrative account deletion and email liberation executed by superAdmin (${authUser.uid})` },
+                    reason: {
+                      stringValue: authDeleted
+                        ? `Administrative account deletion and Firebase Auth liberation executed by superAdmin (${authUser.uid})`
+                        : `Administrative account archival executed by superAdmin (${authUser.uid}); Firebase Auth identity was already absent`,
+                    },
                     createdAt: { stringValue: nowIso },
                   },
                 }),
@@ -1488,15 +1508,16 @@ async function startServer() {
         console.warn('[Server Delete] Failed to record deletion audit event to Firestore:', auditErr?.message || auditErr);
       }
 
+      const responseMessage = authDeleted
+        ? `User account and Firebase Auth identity for ${targetFullName} permanently deleted. Email address liberated.`
+        : `User account archived. Firebase Auth identity was already absent.`;
+
       return res.status(200).json({
         success: true,
-        targetUid,
         authDeleted,
         authAlreadyMissing,
-        firestoreUpdated,
-        message: authDeleted
-          ? `User account and Firebase Auth identity for ${targetFullName} permanently deleted. Email address liberated.`
-          : `Account for ${targetFullName} successfully archived and primary email liberated.`,
+        targetUid,
+        message: responseMessage,
       });
     } catch (err: any) {
       console.error('[Server Delete] Unexpected error during account deletion:', err);

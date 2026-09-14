@@ -293,21 +293,29 @@ export class AdminService {
 
   /**
    * Super Admin account deletion & Firebase Auth liberation.
-   * Sends an authenticated request to the secure server endpoint:
+   * Sends an authenticated request to the authoritative server endpoint:
    * DELETE /api/admin/users/:uid
    * The server cryptographically validates the caller's Firebase ID token,
    * authoritatively checks for role === 'superAdmin' in Firestore,
    * enforces self-deletion and protected account safeguards,
-   * deletes the Firebase Auth identity via authAdmin.deleteUser(targetUid),
+   * authoritatively deletes the Firebase Auth identity via authAdmin.deleteUser(targetUid),
    * updates the Firestore record to 'archived_deleted', and logs an audit event.
+   * If server deletion fails or is rejected, this method throws without modifying Firestore.
    */
   async deleteUserAccount(
     targetUid: string,
-    performedByUid?: string,
-    performerName?: string,
-    performerRole?: UserRole
-  ): Promise<{ success: boolean; authDeleted?: boolean; notice?: string }> {
-    if (!targetUid || typeof targetUid !== 'string') {
+    _performedByUid?: string,
+    _performerName?: string,
+    _performerRole?: UserRole
+  ): Promise<{
+    success: boolean;
+    authDeleted?: boolean;
+    authAlreadyMissing?: boolean;
+    targetUid?: string;
+    notice?: string;
+    message?: string;
+  }> {
+    if (!targetUid || typeof targetUid !== 'string' || !targetUid.trim()) {
       throw new Error('Target user UID is required for deletion.');
     }
 
@@ -316,88 +324,36 @@ export class AdminService {
       throw new Error('Authentication required: Current user session is missing or expired.');
     }
 
-    let serverResult: any = null;
-    let serverError: string | null = null;
-
-    try {
-      const idToken = await currentAuthUser.getIdToken();
-      if (idToken) {
-        const response = await fetch(`/api/admin/users/${encodeURIComponent(targetUid)}`, {
-          method: 'DELETE',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`,
-          },
-        });
-
-        const result = await response.json().catch(() => ({}));
-        if (response.ok) {
-          serverResult = result;
-        } else {
-          serverError = result.message || result.error || `Server returned HTTP ${response.status}`;
-          console.warn('[AdminService] Server deleteUser endpoint response warning:', serverError);
-        }
-      }
-    } catch (err: any) {
-      serverError = err?.message || String(err);
-      console.warn('[AdminService] Server deleteUser endpoint invocation warning:', err);
+    const idToken = await currentAuthUser.getIdToken();
+    if (!idToken) {
+      throw new Error('Failed to retrieve Firebase ID token for Super Admin authorization.');
     }
 
-    // Client-side Firestore guarantee:
-    // Ensures Firestore state is 100% updated and primaryEmailLookup is liberated
-    const userRef = doc(db, 'users', targetUid);
-    const snap = await getDoc(userRef).catch(() => null);
-    const targetData = snap && snap.exists() ? (snap.data() as User) : null;
-    const targetFullName = targetData?.fullName || targetUid;
+    const response = await fetch(`/api/admin/users/${encodeURIComponent(targetUid.trim())}`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+    });
 
-    try {
-      await updateDoc(userRef, {
-        status: 'archived_deleted',
-        archivedAt: new Date().toISOString(),
-        primaryEmailLookup: '',
-        updatedAt: new Date().toISOString(),
-        updatedBy: currentAuthUser.uid,
-      });
-    } catch (fsErr) {
-      console.warn('[AdminService] Client updateDoc users notice:', fsErr);
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok || result?.success !== true) {
+      const errorMsg =
+        result?.message ||
+        result?.error ||
+        `Server returned HTTP ${response.status}`;
+      throw new Error(errorMsg);
     }
-
-    try {
-      await deleteDoc(doc(db, 'registrations', targetUid));
-    } catch (_) {}
-
-    try {
-      await deleteDoc(doc(db, 'userBoimsIndexes', targetUid));
-    } catch (_) {}
-
-    // Record immutable audit event
-    try {
-      const actorUid = currentAuthUser.uid || performedByUid || 'system';
-      await this.logAuditEvent({
-        action: 'DELETE_USER_ACCOUNT',
-        module: 'Users',
-        targetId: targetUid,
-        targetType: 'User',
-        targetName: targetFullName,
-        performedBy: actorUid,
-        performerName: performerName || currentAuthUser.email || 'Super Administrator',
-        performerRole: performerRole || 'superAdmin',
-        previousValues: targetData ? { role: targetData.role, status: targetData.status } : undefined,
-        reason: `Administrative account deletion & email liberation executed by ${performerRole || 'superAdmin'}`,
-      });
-    } catch (auditErr) {
-      console.warn('[AdminService] Audit log recording notice:', auditErr);
-    }
-
-    const noticeMessage = serverResult?.message ||
-      (serverResult?.authDeleted
-        ? `User account and Firebase Auth identity for ${targetFullName} permanently deleted. Email liberated.`
-        : `Account for ${targetFullName} has been successfully archived and email liberated.`);
 
     return {
       success: true,
-      authDeleted: Boolean(serverResult?.authDeleted),
-      notice: noticeMessage,
+      authDeleted: Boolean(result.authDeleted),
+      authAlreadyMissing: Boolean(result.authAlreadyMissing),
+      targetUid: result.targetUid || targetUid.trim(),
+      notice: result.message,
+      message: result.message,
     };
   }
 
