@@ -284,6 +284,8 @@ export const UserManagementPage: React.FC = () => {
         return <Badge variant="primary" className="bg-blue-700 text-white font-bold">Admin</Badge>;
       case 'verifier':
         return <Badge variant="warning" className="bg-amber-600 text-white font-bold">Identity Verifier</Badge>;
+      case 'treasurer':
+        return <Badge variant="warning" className="bg-amber-700 text-white font-bold">Barangay Treasurer</Badge>;
       case 'secretary':
         return <Badge variant="info" className="bg-indigo-600 text-white">Secretary</Badge>;
       case 'purokOfficial':
@@ -414,6 +416,7 @@ export const UserManagementPage: React.FC = () => {
               <option value="chairman">Chairman</option>
               <option value="admin">Admin</option>
               <option value="secretary">Secretary</option>
+              <option value="treasurer">Treasurer</option>
               <option value="purokOfficial">Sitio/Purok Official</option>
               <option value="resident">Resident</option>
             </select>
@@ -630,6 +633,7 @@ export const UserManagementPage: React.FC = () => {
                   <option value="purokOfficial">Sitio/Purok Official</option>
                   <option value="verifier">Identity Verifier</option>
                   <option value="secretary">Barangay Secretary (Records & Certs)</option>
+                  <option value="treasurer">Barangay Treasurer</option>
                   <option value="admin">Administrator (Full Admin Access)</option>
                   <option value="chairman">Barangay Chairman (Executive Authority)</option>
                 </select>
@@ -658,10 +662,10 @@ export const UserManagementPage: React.FC = () => {
                 <div className="bg-red-50 p-3.5 rounded-xl border border-red-200 text-xs text-red-900 space-y-2.5">
                   <div className="font-bold flex items-center gap-1.5 text-red-800">
                     <Trash2 className="w-4 h-4 text-red-600 shrink-0" />
-                    Confirm permanent account deletion & email liberation?
+                    Confirm administrative account removal & archival?
                   </div>
                   <p className="text-red-700 leading-relaxed">
-                    This will permanently delete the account for <strong>{selectedUser.fullName || selectedUser.email}</strong> from <strong>Firebase Authentication</strong> (releasing their email for future registration) and <strong>Firestore</strong>.
+                    This will archive the account for <strong>{selectedUser.fullName || selectedUser.email}</strong> and remove it from active BOIMS operations.
                   </p>
                   <div className="flex items-center gap-2 pt-1">
                     <button
@@ -671,7 +675,7 @@ export const UserManagementPage: React.FC = () => {
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 active:bg-red-800 rounded-lg transition-colors disabled:opacity-50 cursor-pointer shadow-xs"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
-                      {deleteLoading ? 'Deleting Account & Liberating Email...' : 'Yes, Delete Account'}
+                      {deleteLoading ? 'Removing & Archiving Account...' : 'Remove & Archive Account'}
                     </button>
                     <button
                       type="button"
@@ -830,6 +834,7 @@ export const UserManagementPage: React.FC = () => {
                   >
                     <option value="verifier">Identity Verifier</option>
                     <option value="secretary">Secretary</option>
+                    <option value="treasurer">Barangay Treasurer</option>
                     <option value="chairman">Barangay Chairman</option>
                     <option value="admin">Administrator</option>
                     <option value="purokOfficial">Sitio/Purok Official</option>

@@ -92,7 +92,7 @@ export const BottomNavigation: React.FC = () => {
 
   const getQuickActionRoute = () => {
     if (isResidentMode(user, role)) return ROUTES.REPORT_CREATE;
-    if (role === 'secretary') return ROUTES.CERTIFICATES;
+    if (role === 'secretary' || role === 'treasurer') return ROUTES.CERTIFICATES;
     if (role === 'chairman') return ROUTES.DISPATCH;
     return ROUTES.REPORTS;
   };

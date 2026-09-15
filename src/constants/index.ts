@@ -51,6 +51,11 @@ export const ROLE_LABELS: Record<UserRole, { label: string; level: number; descr
   admin: { label: 'Administrator', level: 2, description: 'System Administrator' },
   chairman: { label: 'Barangay Chairman', level: 3, description: 'Executive Authority & Governance' },
   superAdmin: { label: 'Super Administrator', level: 3, description: 'Super Admin & Full System Authority' },
+  treasurer: {
+    label: 'Barangay Treasurer',
+    level: 2,
+    description: 'Disbursement, Collections & Financial Records Officer',
+  },
   developer: { label: 'Developer', level: 3, description: 'System Administrator & Developer' },
 };
 

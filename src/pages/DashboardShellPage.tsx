@@ -45,6 +45,7 @@ import { isReportOwner, isReportAssignedTo } from '../utils/jurisdictionUtils';
 import { SecretaryDashboardView } from '../components/dashboard/SecretaryDashboardView';
 import { ChairmanDashboardView } from '../components/dashboard/ChairmanDashboardView';
 import { DeveloperDashboardView } from '../components/dashboard/DeveloperDashboardView';
+import { TreasurerDashboardView } from '../components/dashboard/TreasurerDashboardView';
 import { RegistrationApprovalPage } from './RegistrationApprovalPage';
 
 export type QueueTab = 'all' | 'pending' | 'assigned' | 'inProgress' | 'critical' | 'onDuty' | 'activeAssignments';
@@ -88,6 +89,7 @@ export const DashboardShellPage: React.FC = () => {
   const isSecretary = role === 'secretary';
   const isChairman = role === 'chairman';
   const isDeveloper = role === 'developer';
+  const isTreasurer = role === 'treasurer';
 
   const [reports, setReports] = useState<Report[]>([]);
   const [responders, setResponders] = useState<UserType[]>([]);
@@ -642,6 +644,18 @@ export const DashboardShellPage: React.FC = () => {
         description="System administration, development, diagnostics & platform monitoring."
       >
         <DeveloperDashboardView reports={reports} loadingReports={loading} />
+      </PageContainer>
+    );
+  }
+
+  // ==================== BARANGAY TREASURER DASHBOARD VIEW ====================
+  if (isTreasurer) {
+    return (
+      <PageContainer
+        title="Barangay Treasurer Dashboard"
+        description="Fee collections, official receipt records, certificate revenue, and barangay property inventory."
+      >
+        <TreasurerDashboardView />
       </PageContainer>
     );
   }

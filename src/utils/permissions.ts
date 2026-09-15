@@ -8,7 +8,7 @@ import { ROUTES } from '../constants';
 
 /**
  * Roles allowed to view and access the Resident Directory (/residents).
- * Strictly limited to: Secretary, Chairman, Admin, Developer.
+ * Authorized official roles: Secretary, Chairman, Admin, Developer, Treasurer.
  * Explicitly DENIED: superAdmin, resident, purokOfficial, verifier.
  */
 export const ALLOWED_RESIDENT_DIRECTORY_ROLES: UserRole[] = [
@@ -16,6 +16,7 @@ export const ALLOWED_RESIDENT_DIRECTORY_ROLES: UserRole[] = [
   'chairman',
   'admin',
   'developer',
+  'treasurer',
 ];
 
 /**
@@ -163,10 +164,10 @@ export function canAccessSystemSettings(role: UserRole | null | undefined): bool
 
 /**
  * Checks if a user can access Barangay Property & Inventory Assets (/inventory).
- * Strictly returns true ONLY for Secretary and Chairman.
+ * Strictly returns true for Secretary, Chairman, and Treasurer.
  */
 export function canAccessInventory(role: UserRole | null | undefined): boolean {
-  return isSecretaryOrChairman(role);
+  return isSecretaryOrChairman(role) || role === 'treasurer';
 }
 
 /**

@@ -195,7 +195,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.INVENTORY}
           element={
-            <RoleGuard allowedRoles={ALLOWED_SECRETARY_CHAIRMAN_ROLES}>
+            <RoleGuard allowedRoles={['secretary', 'chairman', 'treasurer']}>
               <InventoryPage />
             </RoleGuard>
           }

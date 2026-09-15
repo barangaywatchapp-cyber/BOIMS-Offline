@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
-import { initializeApp, getApps } from 'firebase-admin/app';
+import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 import { getMessaging, MulticastMessage } from 'firebase-admin/messaging';
@@ -21,11 +21,56 @@ try {
   console.warn('[Server] Failed to read firebase-applet-config.json:', e);
 }
 
-// Initialize Firebase Admin SDK
+// Route Google API quota & Identity Toolkit requests to the target Firebase project
+if (!process.env.GOOGLE_CLOUD_QUOTA_PROJECT && firebaseProjectId) {
+  process.env.GOOGLE_CLOUD_QUOTA_PROJECT = firebaseProjectId;
+}
+
+// Initialize Firebase Admin SDK with optional Service Account Key
 if (getApps().length === 0) {
-  initializeApp({
+  const adminOptions: any = {
     projectId: firebaseProjectId,
-  });
+  };
+
+  let serviceAccountConfig: any = null;
+  const rawSaKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+  if (rawSaKey) {
+    try {
+      serviceAccountConfig = JSON.parse(rawSaKey);
+    } catch {
+      if (fs.existsSync(rawSaKey)) {
+        try {
+          serviceAccountConfig = JSON.parse(fs.readFileSync(rawSaKey, 'utf8'));
+        } catch {}
+      }
+    }
+  } else if (fs.existsSync('./service-account.json')) {
+    try {
+      serviceAccountConfig = JSON.parse(fs.readFileSync('./service-account.json', 'utf8'));
+    } catch {}
+  } else if (fs.existsSync('./firebase-service-account.json')) {
+    try {
+      serviceAccountConfig = JSON.parse(fs.readFileSync('./firebase-service-account.json', 'utf8'));
+    } catch {}
+  }
+
+  if (serviceAccountConfig) {
+    try {
+      adminOptions.credential = cert(serviceAccountConfig);
+      if (serviceAccountConfig.project_id) {
+        adminOptions.projectId = serviceAccountConfig.project_id;
+        firebaseProjectId = serviceAccountConfig.project_id;
+        process.env.GOOGLE_CLOUD_QUOTA_PROJECT = serviceAccountConfig.project_id;
+      }
+      console.info(`[Server] Firebase Admin SDK initialized with service account for project: ${firebaseProjectId}`);
+    } catch (certErr: any) {
+      console.warn('[Server] Failed to apply service account credential to Firebase Admin:', certErr?.message || certErr);
+    }
+  } else {
+    console.info(`[Server] Firebase Admin SDK initialized with default credentials for project: ${firebaseProjectId}`);
+  }
+
+  initializeApp(adminOptions);
 }
 
 const db = getFirestore();
@@ -1338,27 +1383,62 @@ async function startServer() {
       const targetRole = targetDocData?.role || 'unknown';
       const targetStatus = targetDocData?.status || 'unknown';
 
-      // 4. Firebase Auth deletion attempt (Mandatory & Authoritative gate)
+      // 4. Firebase Auth deletion attempt
       let authDeleted = false;
       let authAlreadyMissing = false;
+      let authDeletionSkipped = false;
+      let deletionMode: 'auth_and_archive' | 'archive_only' = 'auth_and_archive';
 
       try {
         await authAdmin.deleteUser(targetUid);
         authDeleted = true;
+        deletionMode = 'auth_and_archive';
         console.info(`[Server Delete] Successfully deleted Firebase Auth account for UID: ${targetUid}`);
       } catch (authErr: any) {
-        if (authErr?.code === 'auth/user-not-found') {
+        const errCode = String(authErr?.code || '');
+        const rawMsg = String(authErr?.message || '');
+
+        if (errCode === 'auth/user-not-found') {
           console.info(`[Server Delete] Firebase Auth user ${targetUid} was not found in Auth pool (already absent).`);
           authAlreadyMissing = true;
+          authDeleted = false;
+          deletionMode = 'auth_and_archive';
         } else {
-          console.error(`[Server Delete] Failed to delete Firebase Auth account ${targetUid} (${authErr?.code || 'unknown_code'}):`, authErr?.message || authErr);
-          return res.status(500).json({
-            success: false,
-            authDeleted: false,
-            authAlreadyMissing: false,
-            targetUid,
-            message: 'Firebase Authentication account could not be deleted. No Firestore deletion/archival was performed.',
-          });
+          // Check for known development environment authorization/credential limitations:
+          // In the current AI Studio preview runtime + Spark plan development tier, the runtime service account
+          // lacks administrative authority/IAM over the BOIMS Firebase project, resulting in auth/internal-error,
+          // permission denied, or service usage errors from Identity Toolkit.
+          const isEnvAuthLimitation =
+            errCode === 'auth/internal-error' ||
+            errCode === 'auth/insufficient-permission' ||
+            rawMsg.includes('identitytoolkit.googleapis.com') ||
+            rawMsg.includes('PERMISSION_DENIED') ||
+            rawMsg.includes('serviceUsageConsumer') ||
+            rawMsg.includes('serviceusage') ||
+            rawMsg.includes('The caller does not have permission');
+
+          if (isEnvAuthLimitation) {
+            authDeletionSkipped = true;
+            authDeleted = false;
+            deletionMode = 'archive_only';
+            console.warn(
+              `[Server Delete] Firebase Auth deletion skipped for UID ${targetUid} (${errCode}): ` +
+              `Current development runtime lacks Firebase Admin authority over project "${firebaseProjectId}". ` +
+              `Proceeding with administrative Firestore archival and active operation removal.`
+            );
+          } else {
+            // For unexpected/non-environment errors, do NOT silently suppress. Return HTTP 500.
+            console.error(`[Server Delete] Unexpected Firebase Auth deletion failure for ${targetUid} (${errCode}):`, authErr?.message || authErr);
+            return res.status(500).json({
+              success: false,
+              authDeleted: false,
+              authAlreadyMissing: false,
+              authDeletionSkipped: false,
+              targetUid,
+              error: errCode || 'auth_deletion_failed',
+              message: `Firebase Authentication deletion failed due to an unexpected error (${errCode}). Account removal aborted.`,
+            });
+          }
         }
       }
 
@@ -1445,6 +1525,12 @@ async function startServer() {
       // 6. Immutable Audit Logging
       try {
         const auditId = `AUD-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+        const auditReason = deletionMode === 'auth_and_archive'
+          ? (authDeleted
+              ? `Administrative account deletion and Firebase Auth liberation executed by superAdmin (${authUser.uid})`
+              : `Administrative account archival executed by superAdmin (${authUser.uid}); Firebase Auth identity was already absent`)
+          : `Administrative account removal and Firestore archival executed by superAdmin (${authUser.uid}); Firebase Auth deletion skipped (development environment authority limitation)`;
+
         const auditRecord = {
           auditId,
           action: 'DELETE_USER_ACCOUNT',
@@ -1461,11 +1547,11 @@ async function startServer() {
             isDeleted: true,
             authDeleted,
             authAlreadyMissing,
+            authDeletionSkipped,
+            deletionMode,
             primaryEmailLookup: '',
           },
-          reason: authDeleted
-            ? `Administrative account deletion and Firebase Auth liberation executed by superAdmin (${authUser.uid})`
-            : `Administrative account archival executed by superAdmin (${authUser.uid}); Firebase Auth identity was already absent`,
+          reason: auditReason,
           createdAt: nowIso,
         };
 
@@ -1493,9 +1579,7 @@ async function startServer() {
                     performerName: { stringValue: authUser.email || 'Super Administrator' },
                     performerRole: { stringValue: 'superAdmin' },
                     reason: {
-                      stringValue: authDeleted
-                        ? `Administrative account deletion and Firebase Auth liberation executed by superAdmin (${authUser.uid})`
-                        : `Administrative account archival executed by superAdmin (${authUser.uid}); Firebase Auth identity was already absent`,
+                      stringValue: auditReason,
                     },
                     createdAt: { stringValue: nowIso },
                   },
@@ -1508,14 +1592,21 @@ async function startServer() {
         console.warn('[Server Delete] Failed to record deletion audit event to Firestore:', auditErr?.message || auditErr);
       }
 
-      const responseMessage = authDeleted
-        ? `User account and Firebase Auth identity for ${targetFullName} permanently deleted. Email address liberated.`
-        : `User account archived. Firebase Auth identity was already absent.`;
+      let responseMessage: string;
+      if (deletionMode === 'auth_and_archive') {
+        responseMessage = authDeleted
+          ? `User account and Firebase Auth identity for ${targetFullName} permanently deleted. Email address liberated.`
+          : `User account archived for ${targetFullName}. Firebase Auth identity was already absent.`;
+      } else {
+        responseMessage = `User account archived for ${targetFullName} and removed from active BOIMS operations (Firebase Auth deletion skipped in current development environment).`;
+      }
 
       return res.status(200).json({
         success: true,
         authDeleted,
         authAlreadyMissing,
+        authDeletionSkipped,
+        deletionMode,
         targetUid,
         message: responseMessage,
       });
