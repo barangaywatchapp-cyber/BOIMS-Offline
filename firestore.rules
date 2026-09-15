@@ -660,7 +660,7 @@ service cloud.firestore {
     // --- INVENTORY MANAGEMENT ---
 
     match /inventory/{assetId} {
-      allow read, create, update, delete: if isSecretaryOrChairman();
+      allow read, create, update, delete: if isSecretaryOrChairman() || isTreasurer();
     }
 
     // --- ANNOUNCEMENTS ---
