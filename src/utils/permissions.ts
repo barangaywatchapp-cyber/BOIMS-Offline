@@ -16,12 +16,11 @@ export const ALLOWED_RESIDENT_DIRECTORY_ROLES: UserRole[] = [
   'chairman',
   'admin',
   'developer',
-  'treasurer',
 ];
 
 /**
  * Roles allowed to export certificates to Excel (.xlsx).
- * Authorized administrative roles: Secretary, Chairman, Admin, Super Admin, Developer.
+ * Authorized administrative roles: Secretary, Chairman, Admin, Super Admin, Developer, Treasurer.
  * Explicitly EXCLUDED: resident, purokOfficial (in any duty mode/assignment), verifier.
  */
 export const ALLOWED_CERTIFICATE_EXPORT_ROLES: UserRole[] = [
@@ -30,6 +29,7 @@ export const ALLOWED_CERTIFICATE_EXPORT_ROLES: UserRole[] = [
   'admin',
   'superAdmin',
   'developer',
+  'treasurer',
 ];
 
 /**

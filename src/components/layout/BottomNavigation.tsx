@@ -18,6 +18,8 @@ import {
   History,
   RefreshCw,
   ShieldCheck,
+  Receipt,
+  Boxes,
 } from 'lucide-react';
 
 export const BottomNavigation: React.FC = () => {
@@ -90,9 +92,75 @@ export const BottomNavigation: React.FC = () => {
     );
   }
 
+  // Dedicated Mobile Navigation for Barangay Treasurer
+  // Focused navigation: Dashboard, Collections, Inventory, Sync, Profile
+  if (role === 'treasurer') {
+    return (
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-slate-200 shadow-lg px-2 py-1 flex items-center justify-around">
+        <NavLink
+          to={ROUTES.DASHBOARD}
+          className={({ isActive }) =>
+            `flex flex-col items-center justify-center p-2 rounded-lg text-[10px] font-medium transition-colors ${
+              isActive ? 'text-amber-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+            }`
+          }
+        >
+          <LayoutDashboard className="w-5 h-5 mb-0.5" />
+          <span>Dashboard</span>
+        </NavLink>
+
+        <NavLink
+          to={ROUTES.COLLECTIONS}
+          className={({ isActive }) =>
+            `flex flex-col items-center justify-center p-2 rounded-lg text-[10px] font-medium transition-colors ${
+              isActive ? 'text-amber-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+            }`
+          }
+        >
+          <Receipt className="w-5 h-5 mb-0.5" />
+          <span>Collections</span>
+        </NavLink>
+
+        {/* Primary quick action centered on Collections */}
+        <NavLink
+          to={ROUTES.COLLECTIONS}
+          className="flex flex-col items-center justify-center -mt-5 p-2 bg-amber-600 text-white rounded-full shadow-lg ring-4 ring-white hover:bg-amber-700 transition-transform active:scale-95"
+          title="Collect Fee & Issue OR"
+        >
+          <PlusCircle className="w-6 h-6" />
+        </NavLink>
+
+        <NavLink
+          to={ROUTES.INVENTORY}
+          className={({ isActive }) =>
+            `flex flex-col items-center justify-center p-2 rounded-lg text-[10px] font-medium transition-colors ${
+              isActive ? 'text-amber-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+            }`
+          }
+        >
+          <Boxes className="w-5 h-5 mb-0.5" />
+          <span>Inventory</span>
+        </NavLink>
+
+        <NavLink
+          to={ROUTES.PROFILE}
+          className={({ isActive }) =>
+            `flex flex-col items-center justify-center p-2 rounded-lg text-[10px] font-medium transition-colors ${
+              isActive ? 'text-amber-700 font-bold' : 'text-slate-500 hover:text-slate-900'
+            }`
+          }
+        >
+          <User className="w-5 h-5 mb-0.5" />
+          <span>Profile</span>
+        </NavLink>
+      </nav>
+    );
+  }
+
   const getQuickActionRoute = () => {
     if (isResidentMode(user, role)) return ROUTES.REPORT_CREATE;
-    if (role === 'secretary' || role === 'treasurer') return ROUTES.CERTIFICATES;
+    if (role === 'secretary') return ROUTES.CERTIFICATES;
+    if (role === 'treasurer') return ROUTES.COLLECTIONS;
     if (role === 'chairman') return ROUTES.DISPATCH;
     return ROUTES.REPORTS;
   };

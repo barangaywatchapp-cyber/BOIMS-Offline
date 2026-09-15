@@ -124,6 +124,7 @@ export const ROUTES = {
   RESIDENTS: '/residents',
   HOUSEHOLDS: '/households',
   BLOTTER: '/blotter',
+  COLLECTIONS: '/collections',
   INVENTORY: '/inventory',
   ANALYTICS: '/analytics',
   SETTINGS: '/settings',

@@ -36,6 +36,7 @@ import {
   User,
   History,
   RefreshCw,
+  Receipt,
 } from 'lucide-react';
 
 export interface NavigationDrawerProps {
@@ -85,6 +86,24 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({ isOpen, onCl
         { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: <LayoutDashboard className="w-5 h-5" /> },
         { label: 'Announcements', path: ROUTES.ANNOUNCEMENTS, icon: <Megaphone className="w-5 h-5" /> },
         { label: 'Notifications', path: ROUTES.NOTIFICATIONS, icon: <Bell className="w-5 h-5" /> },
+      ];
+    }
+
+    // Dedicated Barangay Treasurer navigation scope:
+    // 1. Dashboard
+    // 2. Financials / Collections
+    // 3. Inventory Assets
+    // 4. Notifications
+    // 5. Offline Queue & Sync
+    // 6. Production Readiness
+    if (role === 'treasurer') {
+      return [
+        { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: <LayoutDashboard className="w-5 h-5" /> },
+        { label: 'Financials / Collections', path: ROUTES.COLLECTIONS, icon: <Receipt className="w-5 h-5" /> },
+        { label: 'Inventory Assets', path: ROUTES.INVENTORY, icon: <Boxes className="w-5 h-5" /> },
+        { label: 'Notifications', path: ROUTES.NOTIFICATIONS, icon: <Bell className="w-5 h-5" /> },
+        { label: 'Offline Queue & Sync', path: ROUTES.OFFLINE_SYNC, icon: <RefreshCw className="w-5 h-5" /> },
+        { label: 'Production Readiness', path: ROUTES.SYSTEM_HEALTH, icon: <ShieldCheck className="w-5 h-5" /> },
       ];
     }
 

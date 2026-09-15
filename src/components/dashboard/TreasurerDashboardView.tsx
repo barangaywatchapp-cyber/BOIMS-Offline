@@ -167,19 +167,10 @@ export const TreasurerDashboardView: React.FC = () => {
               variant="secondary"
               size="sm"
               icon={<Receipt className="w-4 h-4" />}
-              onClick={() => navigate(ROUTES.CERTIFICATES)}
+              onClick={() => navigate(ROUTES.COLLECTIONS)}
               className="bg-white text-amber-950 hover:bg-amber-50 font-bold"
             >
-              Certificate Fee Processing
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              icon={<Users className="w-4 h-4" />}
-              onClick={() => navigate(ROUTES.RESIDENTS)}
-              className="bg-amber-800/60 border-amber-400/40 text-white hover:bg-amber-700/80 font-medium"
-            >
-              Resident Reference Lookup
+              Financial Collections
             </Button>
             <Button
               variant="outline"
@@ -480,10 +471,10 @@ export const TreasurerDashboardView: React.FC = () => {
                       <Button
                         variant="ghost"
                         size="sm"
-                        icon={<ExternalLink className="w-3.5 h-3.5" />}
-                        onClick={() => navigate(ROUTES.CERTIFICATE_DETAILS(cert.certificateId))}
+                        icon={<Receipt className="w-3.5 h-3.5 text-amber-700" />}
+                        onClick={() => navigate(ROUTES.COLLECTIONS)}
                       >
-                        Inspect
+                        Process
                       </Button>
                     </td>
                   </tr>
@@ -498,10 +489,10 @@ export const TreasurerDashboardView: React.FC = () => {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => navigate(ROUTES.CERTIFICATES)}
+              onClick={() => navigate(ROUTES.COLLECTIONS)}
               className="text-xs font-semibold"
             >
-              View all {filteredCerts.length} records in Certificates Module
+              View all {filteredCerts.length} records in Collections Ledger
             </Button>
           </div>
         )}

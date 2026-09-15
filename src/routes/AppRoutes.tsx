@@ -31,6 +31,7 @@ import { DemographicsAnalyticsPage } from '../pages/DemographicsAnalyticsPage';
 import { ALLOWED_ANALYTICS_ROLES, ALLOWED_SECRETARY_CHAIRMAN_ROLES } from '../utils/permissions';
 import { BlotterPage } from '../pages/BlotterPage';
 import { InventoryPage } from '../pages/InventoryPage';
+import { TreasurerCollectionsPage } from '../pages/TreasurerCollectionsPage';
 import { UserManagementPage } from '../pages/UserManagementPage';
 import { AuditLogsPage } from '../pages/AuditLogsPage';
 import { AdminHistoryPage } from '../pages/AdminHistoryPage';
@@ -89,7 +90,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.REPORTS}
           element={
-            <RoleGuard disallowedRoles={['superAdmin']}>
+            <RoleGuard disallowedRoles={['superAdmin', 'treasurer']}>
               <ReportsListPage />
             </RoleGuard>
           }
@@ -97,7 +98,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.REPORT_CREATE}
           element={
-            <RoleGuard disallowedRoles={['superAdmin']}>
+            <RoleGuard disallowedRoles={['superAdmin', 'treasurer']}>
               <CreateReportPage />
             </RoleGuard>
           }
@@ -105,7 +106,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.REPORT_DETAILS(':id')}
           element={
-            <RoleGuard disallowedRoles={['superAdmin']}>
+            <RoleGuard disallowedRoles={['superAdmin', 'treasurer']}>
               <ReportDetailsPage />
             </RoleGuard>
           }
@@ -113,7 +114,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.CERTIFICATES}
           element={
-            <RoleGuard disallowedRoles={['superAdmin']}>
+            <RoleGuard disallowedRoles={['superAdmin', 'treasurer']}>
               <CertificatesListPage />
             </RoleGuard>
           }
@@ -121,7 +122,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.CERTIFICATE_REQUEST}
           element={
-            <RoleGuard disallowedRoles={['superAdmin']}>
+            <RoleGuard disallowedRoles={['superAdmin', 'treasurer']}>
               <RequestCertificatePage />
             </RoleGuard>
           }
@@ -129,7 +130,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.CERTIFICATE_DETAILS(':id')}
           element={
-            <RoleGuard disallowedRoles={['superAdmin']}>
+            <RoleGuard disallowedRoles={['superAdmin', 'treasurer']}>
               <CertificateDetailsPage />
             </RoleGuard>
           }
@@ -137,7 +138,7 @@ export const AppRoutes: React.FC = () => {
         <Route
           path={ROUTES.ANNOUNCEMENTS}
           element={
-            <RoleGuard disallowedRoles={['superAdmin']}>
+            <RoleGuard disallowedRoles={['superAdmin', 'treasurer']}>
               <AnnouncementsListPage />
             </RoleGuard>
           }
@@ -188,6 +189,15 @@ export const AppRoutes: React.FC = () => {
           element={
             <RoleGuard allowedRoles={ALLOWED_SECRETARY_CHAIRMAN_ROLES}>
               <BlotterPage />
+            </RoleGuard>
+          }
+        />
+
+        <Route
+          path={ROUTES.COLLECTIONS}
+          element={
+            <RoleGuard allowedRoles={['treasurer']}>
+              <TreasurerCollectionsPage />
             </RoleGuard>
           }
         />
