@@ -61,7 +61,9 @@ Following the initial July 29, 2026 baseline, the following verified architectur
 | **Data Integrity** | Immutable Audit Logs (`allow update, delete: if false;`) | Implemented, Configuration Review & Code Verification |
 | **Performance** | Diagnostic Thresholds: Hydration < 150ms, JS Heap < 25MB, Firestore ping ~60ms | Implemented, Representative Code-Level Diagnostic Benchmarks |
 | **Offline Resilience** | 4-store IndexedDB persistence, DLQ quarantine, multi-tab coordination, 3-tier exponential backoff | Implemented, Stress Tested & Code Verification |
-| **Build & Compilation** | Clean TypeScript compilation (`tsc --noEmit`), ESLint clean | Implemented & Automated Build Verified (`compile_applet`) |
+| **Build & Compilation** | Production build verified via repository build process (`vite build` + server bundle); TypeScript diagnostics tracked separately via `tsc --noEmit` (no ESLint script defined) | Implemented & Build Verified (Diagnostics Tracked Separately) |
+
+*Note on Build & Lint Validation:* Production builds execute successfully through the repository build process. TypeScript diagnostics are tracked separately through `npm run lint` (`tsc --noEmit`); the repository does not currently define an ESLint npm script. Existing TypeScript/UI diagnostics must not be represented as a completely clean compilation.
 
 *Note on Performance Metrics:* Figures listed above represent code-level diagnostic thresholds and synthetic benchmark heuristics utilized by `systemReadinessService.ts` for health evaluations, rather than continuous live production telemetry.
 
