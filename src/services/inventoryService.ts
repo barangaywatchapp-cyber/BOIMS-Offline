@@ -16,10 +16,11 @@ import {
   where,
   limit,
   startAfter,
+  onSnapshot,
   QueryConstraint,
   DocumentSnapshot,
 } from 'firebase/firestore';
-import { db } from '../firebase/config';
+import { db, auth } from '../firebase/config';
 import { isAppOnline } from '../offline/networkManager';
 import { syncService } from './SyncService';
 import { offlineStorage } from '../offline/storage';
@@ -178,6 +179,60 @@ class InventoryService {
     }
 
     return this.getLocalCache().filter((item) => !item.isDeleted);
+  }
+
+  /**
+   * Subscribes to real-time updates for non-deleted inventory items.
+   * Leverages Firestore onSnapshot with optimistic local cache merging and offline fallback.
+   */
+  subscribeToInventory(callback: (items: InventoryItem[]) => void): () => void {
+    // If unauthenticated or completely offline at subscription start, provide local cache immediately
+    if (!auth.currentUser || !isAppOnline()) {
+      callback(this.getLocalCache().filter((item) => !item.isDeleted));
+      return () => {};
+    }
+
+    const q = query(
+      collection(db, INVENTORY_COLLECTION),
+      where('isDeleted', '==', false)
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const remoteItems: InventoryItem[] = [];
+        snapshot.forEach((docSnap) => {
+          const item = docSnap.data() as InventoryItem;
+          if (!item.isDeleted) {
+            remoteItems.push(item);
+          }
+        });
+
+        // Merge with local cache to preserve valid locally queued / offline-created records
+        const merged = [...remoteItems];
+        const local = this.getLocalCache();
+        local.forEach((localItem) => {
+          if (!merged.some((m) => m.assetId === localItem.assetId) && !localItem.isDeleted) {
+            merged.push(localItem);
+          }
+        });
+
+        // Sort consistently by createdAt (newest first)
+        merged.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+        // Update local memory, localStorage, and IndexedDB caches
+        this.setLocalCache(merged);
+
+        // Notify subscriber
+        callback(merged);
+      },
+      (error) => {
+        console.warn('[InventoryService] onSnapshot subscription error, falling back to cache:', error);
+        callback(this.getLocalCache().filter((item) => !item.isDeleted));
+      }
+    );
+
+    return unsubscribe;
   }
 
   /**

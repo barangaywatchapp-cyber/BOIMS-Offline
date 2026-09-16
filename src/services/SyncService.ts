@@ -181,19 +181,21 @@ class SyncService {
       }
     }
 
-    // Enforce strict authorization on inventory collection: Secretary & Chairman ONLY
+    // Enforce strict authorization on inventory collection: Secretary, Chairman, Treasurer, & Admin ONLY
     if (normalizedCollection === 'inventory') {
+      const userRole = authorUser?.role as string | undefined;
       const isAuthorized =
-        authorUser &&
-        (authorUser.role === 'secretary' ||
-          authorUser.role === 'chairman' ||
-          authorUser.role === 'admin' ||
-          authorUser.role === 'superAdmin');
+        Boolean(authorUser) &&
+        (userRole === 'secretary' ||
+          userRole === 'chairman' ||
+          userRole === 'treasurer' ||
+          userRole === 'admin' ||
+          userRole === 'superAdmin');
       if (!isAuthorized) {
         const role = authorUser?.role || 'unauthenticated';
         console.warn(`[SyncService] Refusing unauthorized mutation on inventory by role: ${role}`);
         throw new Error(
-          `Unauthorized offline mutation: Role '${role}' is not permitted to perform '${operationType}' on collection 'inventory'. Only Secretary and Chairman are authorized.`
+          `Unauthorized offline mutation: Role '${role}' is not permitted to perform '${operationType}' on collection 'inventory'. Only Secretary, Chairman, Treasurer, and Admin are authorized.`
         );
       }
     }

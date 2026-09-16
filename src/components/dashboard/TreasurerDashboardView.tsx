@@ -60,29 +60,18 @@ export const TreasurerDashboardView: React.FC = () => {
     };
   }, [isAuthInitialized, user?.uid, user?.role]);
 
-  // Fetch Inventory assets
+  // Subscribe to real-time Inventory assets
   useEffect(() => {
     if (!isAuthInitialized) return;
 
-    let isMounted = true;
     setLoadingInventory(true);
-    inventoryService
-      .getInventoryItems()
-      .then((items) => {
-        if (isMounted) {
-          setInventoryItems(items);
-          setLoadingInventory(false);
-        }
-      })
-      .catch((err) => {
-        console.warn('[TreasurerDashboardView] Failed to load inventory:', err);
-        if (isMounted) {
-          setLoadingInventory(false);
-        }
-      });
+    const unsubscribe = inventoryService.subscribeToInventory((items) => {
+      setInventoryItems(items);
+      setLoadingInventory(false);
+    });
 
     return () => {
-      isMounted = false;
+      unsubscribe();
     };
   }, [isAuthInitialized]);
 

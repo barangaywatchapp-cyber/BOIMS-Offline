@@ -106,25 +106,23 @@ export const InventoryPage: React.FC = () => {
   const isAuthorized = canAccessInventory(role);
   const canManage = isAuthorized;
 
-  const fetchItems = async () => {
+  useEffect(() => {
+    if (!isAuthInitialized) return;
     if (!isAuthorized) {
       setLoading(false);
       return;
     }
-    try {
-      const data = await inventoryService.getInventoryItems();
-      setItems(data);
-    } catch (err) {
-      console.error('Failed to load inventory assets:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
 
-  useEffect(() => {
-    if (!isAuthInitialized) return;
-    fetchItems();
-  }, [isAuthInitialized, role]);
+    setLoading(true);
+    const unsubscribe = inventoryService.subscribeToInventory((data) => {
+      setItems(data);
+      setLoading(false);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [isAuthInitialized, role, isAuthorized]);
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
