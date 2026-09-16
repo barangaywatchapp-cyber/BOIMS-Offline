@@ -97,6 +97,7 @@ class InventoryService {
   }
 
   private setLocalCache(data: InventoryItem[]): void {
+    const previous = this.memoryCache;
     this.memoryCache = data;
     if (typeof window !== 'undefined') {
       try {
@@ -105,7 +106,18 @@ class InventoryService {
         console.warn('[InventoryService] Error saving to localStorage:', e);
       }
     }
-    // Asynchronously update IndexedDB
+
+    // Prune removed items from IndexedDB offlineEntities
+    if (previous && previous.length > 0) {
+      const activeIds = new Set(data.map((item) => item.assetId));
+      previous.forEach((prevItem) => {
+        if (!activeIds.has(prevItem.assetId)) {
+          offlineStorage.deleteCachedEntity(INVENTORY_COLLECTION, prevItem.assetId).catch(() => {});
+        }
+      });
+    }
+
+    // Asynchronously update / refresh retained entities in IndexedDB
     data.forEach((item) => {
       offlineStorage.putCachedEntity(INVENTORY_COLLECTION, item.assetId, item).catch(() => {});
     });
@@ -208,19 +220,48 @@ class InventoryService {
           }
         });
 
-        // Merge with local cache to preserve valid locally queued / offline-created records
-        const merged = [...remoteItems];
+        // Reconcile with local cache:
+        // Firestore snapshot is authoritative for all existing documents.
+        // If a local record is missing from Firestore, only retain it if there is a
+        // legitimate active pending inventory mutation in SyncService for this exact assetId.
+        const pendingQueue = syncService
+          .getQueue()
+          .filter(
+            (q) =>
+              (q.collectionName === INVENTORY_COLLECTION || q.collectionName === 'inventory') &&
+              (q.status === 'pending' || q.status === 'syncing')
+          );
+
+        const mergedMap = new Map<string, InventoryItem>();
+        // 1. Authoritative Firestore records
+        remoteItems.forEach((r) => {
+          if (r.assetId) mergedMap.set(r.assetId, r);
+        });
+
+        // 2. Legitimate pending local creations
         const local = this.getLocalCache();
         local.forEach((localItem) => {
-          if (!merged.some((m) => m.assetId === localItem.assetId) && !localItem.isDeleted) {
-            merged.push(localItem);
+          if (!localItem || !localItem.assetId || localItem.isDeleted) return;
+
+          // If already in Firestore, the authoritative remote record is preserved
+          if (mergedMap.has(localItem.assetId)) return;
+
+          // Only retain if there is an active pending creation mutation in the queue
+          const isPendingCreation = pendingQueue.some(
+            (q) => q.recordId === localItem.assetId && q.operationType === 'create'
+          );
+
+          if (isPendingCreation) {
+            mergedMap.set(localItem.assetId, localItem);
           }
         });
+
+        const merged = Array.from(mergedMap.values());
 
         // Sort consistently by createdAt (newest first)
         merged.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
 
-        // Update local memory, localStorage, and IndexedDB caches
+        // Reconcile local memory, localStorage, and IndexedDB caches with the authoritative set
         this.setLocalCache(merged);
 
         // Notify subscriber
