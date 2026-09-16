@@ -395,10 +395,7 @@ class InventoryService {
       resolvedAuthor = { uid: createdBy, role: 'secretary', fullName: 'Barangay Officer' } as any;
     }
 
-    // 6. Enqueue mutation
-    syncService.enqueue('create', INVENTORY_COLLECTION, assetId, newItem, resolvedAuthor);
-
-    // 7. Non-blocking audit trail logging
+    // 6. Non-blocking audit trail logging
     adminService
       .logAuditEvent({
         action: 'INVENTORY_ITEM_CREATED',
@@ -411,15 +408,33 @@ class InventoryService {
       })
       .catch((err) => console.warn('[InventoryService] Audit log error:', err));
 
-    // 8. If online, fire-and-forget background sync (never blocks local completion)
-    if (isAppOnline()) {
-      const docRef = doc(db, INVENTORY_COLLECTION, assetId);
-      setDoc(docRef, newItem).catch((error) => {
-        console.warn('[InventoryService] Background Firestore setDoc failed (queued):', error);
-      });
+    // 7. Standard BOIMS Online/Offline Synchronization Pattern:
+    // When offline: Enqueue legitimate CREATE mutation to SyncService for replay upon reconnect.
+    // When online: Write directly to Firestore. Only enqueue if direct write fails due to network/unavailable conditions.
+    if (!isAppOnline()) {
+      console.info(`[InventoryService] Offline mode: Enqueueing inventory create mutation for ${assetId}`);
+      syncService.enqueue('create', INVENTORY_COLLECTION, assetId, newItem, resolvedAuthor);
+      return newItem;
     }
 
-    // 9. Return immediately
+    try {
+      const docRef = doc(db, INVENTORY_COLLECTION, assetId);
+      await setDoc(docRef, newItem);
+    } catch (error: any) {
+      const isPermissionError =
+        error?.code === 'permission-denied' ||
+        error?.message?.includes('Missing or insufficient permissions') ||
+        error?.message?.includes('permission-denied');
+
+      if (isPermissionError) {
+        throw error;
+      }
+
+      console.warn('[InventoryService] Direct Firestore setDoc failed, enqueuing for offline sync:', error);
+      syncService.enqueue('create', INVENTORY_COLLECTION, assetId, newItem, resolvedAuthor);
+    }
+
+    // 8. Return immediately
     return newItem;
   }
 
@@ -465,9 +480,6 @@ class InventoryService {
       resolvedAuthor = { uid: updatedBy, role: 'secretary', fullName: 'Barangay Officer' } as any;
     }
 
-    // Enqueue mutation
-    syncService.enqueue('update', INVENTORY_COLLECTION, assetId, { ...updates, updatedAt: now, updatedBy }, resolvedAuthor);
-
     // Audit trail logging (non-blocking)
     adminService
       .logAuditEvent({
@@ -481,12 +493,32 @@ class InventoryService {
       })
       .catch((err) => console.warn('[InventoryService] Audit log error:', err));
 
-    // Non-blocking Firestore update if online
-    if (isAppOnline()) {
+    const updatePayload = { ...updates, updatedAt: now, updatedBy };
+
+    // Standard BOIMS Online/Offline Synchronization Pattern:
+    // When offline: Enqueue UPDATE mutation to SyncService for replay upon reconnect.
+    // When online: Write directly to Firestore. Only enqueue if direct write fails due to network/unavailable conditions.
+    if (!isAppOnline()) {
+      console.info(`[InventoryService] Offline mode: Enqueueing inventory update mutation for ${assetId}`);
+      syncService.enqueue('update', INVENTORY_COLLECTION, assetId, updatePayload, resolvedAuthor);
+      return updatedItem;
+    }
+
+    try {
       const docRef = doc(db, INVENTORY_COLLECTION, assetId);
-      updateDoc(docRef, { ...updates, updatedAt: now, updatedBy }).catch((error) => {
-        console.warn('[InventoryService] Background Firestore updateDoc failed (queued):', error);
-      });
+      await updateDoc(docRef, updatePayload);
+    } catch (error: any) {
+      const isPermissionError =
+        error?.code === 'permission-denied' ||
+        error?.message?.includes('Missing or insufficient permissions') ||
+        error?.message?.includes('permission-denied');
+
+      if (isPermissionError) {
+        throw error;
+      }
+
+      console.warn('[InventoryService] Direct Firestore updateDoc failed, enqueuing for offline sync:', error);
+      syncService.enqueue('update', INVENTORY_COLLECTION, assetId, updatePayload, resolvedAuthor);
     }
 
     return updatedItem;
@@ -670,9 +702,7 @@ class InventoryService {
       resolvedAuthor = { uid: deletedBy, role: 'secretary', fullName: 'Barangay Officer' } as any;
     }
 
-    // Enqueue mutation
-    syncService.enqueue('delete', INVENTORY_COLLECTION, assetId, { isDeleted: true, deletedAt: now, deletedBy }, resolvedAuthor);
-
+    // Audit trail logging (non-blocking)
     adminService
       .logAuditEvent({
         action: 'INVENTORY_ITEM_DELETED',
@@ -684,12 +714,32 @@ class InventoryService {
       })
       .catch((err) => console.warn('[InventoryService] Audit log error:', err));
 
-    // Non-blocking Firestore update if online
-    if (isAppOnline()) {
+    const deletePayload = { isDeleted: true, deletedAt: now, deletedBy };
+
+    // Standard BOIMS Online/Offline Synchronization Pattern:
+    // When offline: Enqueue DELETE mutation to SyncService for replay upon reconnect.
+    // When online: Write directly to Firestore. Only enqueue if direct write fails due to network/unavailable conditions.
+    if (!isAppOnline()) {
+      console.info(`[InventoryService] Offline mode: Enqueueing inventory delete mutation for ${assetId}`);
+      syncService.enqueue('delete', INVENTORY_COLLECTION, assetId, deletePayload, resolvedAuthor);
+      return;
+    }
+
+    try {
       const docRef = doc(db, INVENTORY_COLLECTION, assetId);
-      updateDoc(docRef, { isDeleted: true, deletedAt: now, deletedBy }).catch((error) => {
-        console.warn('[InventoryService] Background Firestore delete failed (queued):', error);
-      });
+      await updateDoc(docRef, deletePayload);
+    } catch (error: any) {
+      const isPermissionError =
+        error?.code === 'permission-denied' ||
+        error?.message?.includes('Missing or insufficient permissions') ||
+        error?.message?.includes('permission-denied');
+
+      if (isPermissionError) {
+        throw error;
+      }
+
+      console.warn('[InventoryService] Direct Firestore delete failed, enqueuing for offline sync:', error);
+      syncService.enqueue('delete', INVENTORY_COLLECTION, assetId, deletePayload, resolvedAuthor);
     }
   }
 }
