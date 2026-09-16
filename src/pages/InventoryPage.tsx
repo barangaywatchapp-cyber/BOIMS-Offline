@@ -46,6 +46,7 @@ export const InventoryPage: React.FC = () => {
   const { user, role, isAuthInitialized } = useAuth();
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -122,7 +123,7 @@ export const InventoryPage: React.FC = () => {
     return () => {
       unsubscribe();
     };
-  }, [isAuthInitialized, role, isAuthorized]);
+  }, [isAuthInitialized, role, isAuthorized, refreshTrigger]);
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -381,7 +382,12 @@ export const InventoryPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" onClick={fetchItems} className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setRefreshTrigger((prev) => prev + 1)}
+            className="flex items-center gap-2"
+          >
             <RefreshCw className="w-4 h-4" /> Refresh
           </Button>
 
